@@ -4,7 +4,6 @@ import {
 	INodeType,
 	INodeTypeDescription,
 	NodeOperationError,
-	NodeConnectionType,
 } from 'n8n-workflow';
 
 import { IInstagramCredentials } from '../lib/types';
@@ -15,15 +14,15 @@ export class Instagram implements INodeType {
 		displayName: 'Instagram Scraper',
 		name: 'instagram',
 		icon: 'file:instagram.svg',
-		group: ['social'],
+		group: ['transform'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 		description: 'Extract Instagram post/reel metadata (title, caption, thumbnail, likes...) using a logged-in session, including 18+ content',
 		defaults: {
 			name: 'Instagram Scraper',
 		},
-		inputs: [NodeConnectionType.Main],
-		outputs: [NodeConnectionType.Main],
+		inputs: ['main'],
+		outputs: ['main'],
 		credentials: [
 			{
 				name: 'instagramApi',
