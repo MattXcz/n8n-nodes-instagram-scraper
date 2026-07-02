@@ -1,4 +1,4 @@
-import { RetryOptions } from './types';
+import { RetryOptions, IInstagramPostSummary } from './types';
 
 /**
  * Utility functions for Instagram n8n integration
@@ -130,5 +130,91 @@ export class Utils {
 		return imageVersions2.candidates.reduce((best, current) =>
 			current.width > best.width ? current : best,
 		).url;
+	}
+
+	/**
+	 * Decodes HTML entities commonly found in meta tag content.
+	 */
+	static decodeHtmlEntities(text: string): string {
+		return text
+			.replace(/&quot;/g, '"')
+			.replace(/&#039;/g, "'")
+			.replace(/&apos;/g, "'")
+			.replace(/&lt;/g, '<')
+			.replace(/&gt;/g, '>')
+			.replace(/&amp;/g, '&');
+	}
+
+	/**
+	 * Parses compact numbers like "12,345", "12.3K" or "1.2M" into an integer.
+	 * Returns 0 if the input doesn't look like a number.
+	 */
+	static parseCompactNumber(text: string): number {
+		if (!text) return 0;
+		const cleaned = text.trim().replace(/,/g, '');
+		const match = cleaned.match(/^([\d.]+)\s*([KkMm]?)$/);
+		if (!match) return 0;
+		const value = parseFloat(match[1]);
+		if (isNaN(value)) return 0;
+		const suffix = match[2].toLowerCase();
+		if (suffix === 'k') return Math.round(value * 1000);
+		if (suffix === 'm') return Math.round(value * 1000000);
+		return Math.round(value);
+	}
+
+	/**
+	 * Best-effort extraction of post/reel metadata from the raw HTML of an
+	 * authenticated instagram.com page load. Used as a fallback when the
+	 * mobile private API is blocked by a `checkpoint_required` response.
+	 *
+	 * Instagram's Open Graph meta tags are the most stable part of the page
+	 * to parse; the "X likes, Y comments - username on DATE: "caption""
+	 * pattern in og:description is also long-standing, but may not always
+	 * match (e.g. if likes are hidden) - in that case counts default to 0.
+	 */
+	static parsePostHtml(html: string, url: string, shortcode: string): IInstagramPostSummary {
+		const metaContent = (property: string): string => {
+			const re = new RegExp(`<meta property="${property}"\\s+content="([^"]*)"`, 'i');
+			const match = html.match(re);
+			return match ? this.decodeHtmlEntities(match[1]) : '';
+		};
+
+		const ogTitle = metaContent('og:title');
+		const ogDescription = metaContent('og:description');
+		const thumbnail = metaContent('og:image');
+		const isVideo = /<meta property="og:video/i.test(html) || /\/reel[s]?\//i.test(url);
+
+		let likeCount = 0;
+		let commentCount = 0;
+		let author = '';
+		let caption = ogDescription;
+
+		const statsMatch = ogDescription.match(
+			/^([\d.,KkMm]+)\s+likes?,\s+([\d.,KkMm]+)\s+comments?\s*-\s*([a-zA-Z0-9._]+)\s+on\s+[^:]+:\s*"?([\s\S]*?)"?$/,
+		);
+		if (statsMatch) {
+			likeCount = this.parseCompactNumber(statsMatch[1]);
+			commentCount = this.parseCompactNumber(statsMatch[2]);
+			author = statsMatch[3];
+			caption = statsMatch[4];
+		}
+
+		return {
+			url,
+			shortcode,
+			mediaId: '',
+			title: ogTitle || caption.split('\n')[0].trim() || 'Instagram post',
+			description: caption,
+			thumbnail,
+			isVideo,
+			mediaType: isVideo ? 'video' : 'photo',
+			likeCount,
+			commentCount,
+			viewCount: null,
+			author,
+			authorFullName: '',
+			takenAt: '',
+			takenAtTimestamp: 0,
+		};
 	}
 }

@@ -8,6 +8,7 @@ This is a fork of [n8n-nodes-instagram-private-api-wrapped](https://github.com/t
 - Shortcode -> media ID conversion is done locally (same algorithm Instagram itself uses), so unlike GraphQL-based scrapers this doesn't depend on Instagram's `doc_id`, which rotates every few weeks and breaks those scrapers.
 - Removed operations unrelated to metadata scraping (posting, liking, follow/unfollow, direct messages) to keep the node small and the maintenance surface minimal.
 - Automatic login + session caching: fill in Username/Password once in the credential and the node handles everything else — it logs in on first use, caches the resulting session in the workflow's static data, and reuses it on every later execution, only logging in again if that cached session ever expires or gets rejected.
+- Automatic web fallback: if the mobile private API returns `checkpoint_required` for a specific post/reel (this can happen for restricted/sensitive content even with a fully valid session, since Instagram scrutinizes mobile-app-style requests more than plain browser access), the node automatically retries with a plain authenticated web request using the same session cookies — the same access pattern as opening the link in a logged-in browser tab. This fallback parses Open Graph meta tags instead of the private API's structured JSON, so like/comment/view counts may be less precise (or 0/null) in that path.
 
 ## Authentication
 
@@ -61,7 +62,7 @@ Instagram can change its private API at any time without notice; this is an unof
 
 1. Whether `instagram-private-api` has a newer version that fixes it (`npm update instagram-private-api`).
 2. Whether the cached session expired — with Username/Password set, the node re-logs in automatically; with the cookie fallback, copy fresh values from the browser.
-3. Whether Instagram flagged the account with a `checkpoint_required` (wait 24-48h, complete any prompt in the app, or use a different account).
+3. Whether Instagram flagged the account with a `checkpoint_required` on a specific post (the node retries automatically via the web fallback described above) or account-wide (wait 24-48h, complete any prompt in the app, or use a different account).
 
 If you ever need to force a fresh login (e.g. after switching accounts), clear the workflow's static data by deactivating/reactivating the workflow, or simply change the Username in the credential.
 

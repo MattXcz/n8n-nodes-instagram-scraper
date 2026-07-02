@@ -138,9 +138,26 @@ export class InstagramClient {
 			// (e.g. after a session expires) reuses the same fingerprint.
 			this.client.state.generateDevice(username);
 
-			await this.client.simulate.preLoginFlow();
+			// preLoginFlow is just realism (mimics the app warming up before
+			// login) - if it fails, still attempt the actual login below.
+			try {
+				await this.client.simulate.preLoginFlow();
+			} catch {
+				// ignore - not required for a working session
+			}
+
 			const loggedInUser = await this.client.account.login(username, password);
-			await this.client.simulate.postLoginFlow();
+
+			// Same for postLoginFlow: it simulates post-login app behavior
+			// (checking DMs, badges, etc). A failure here (e.g. a transient
+			// non-standard status code from one of those endpoints) doesn't
+			// mean the login itself failed - we already have a valid,
+			// authenticated session at this point, so don't discard it.
+			try {
+				await this.client.simulate.postLoginFlow();
+			} catch {
+				// ignore - login already succeeded, session is still valid
+			}
 
 			const sessionData = JSON.stringify(await this.client.state.serialize());
 			this.isAuthenticated = true;
@@ -262,10 +279,28 @@ export class InstagramClient {
 	 * the numeric media ID, fetches full media info (works for age-restricted
 	 * / 18+ content as long as the authenticated account is allowed to view
 	 * it) and returns a flat, ready-to-use summary.
+	 *
+	 * If the mobile private-API request gets a `checkpoint_required` (this
+	 * can happen for restricted/sensitive content even with a perfectly
+	 * valid session, since Instagram scrutinizes the mobile-app-style
+	 * request pattern more heavily than plain browser access), this
+	 * automatically falls back to an authenticated web request instead -
+	 * the same access pattern as opening the link in a logged-in browser.
 	 */
 	async getPostByUrl(url: string): Promise<IInstagramPostSummary> {
 		this.ensureAuthenticated();
+		try {
+			return await this.getPostByUrlPrivateApi(url);
+		} catch (error) {
+			const message = Utils.formatError(error).toLowerCase();
+			if (message.includes('checkpoint_required')) {
+				return await this.getPostByUrlWeb(url);
+			}
+			throw error;
+		}
+	}
 
+	private async getPostByUrlPrivateApi(url: string): Promise<IInstagramPostSummary> {
 		const shortcode = Utils.extractShortcode(url);
 		if (!shortcode) {
 			throw new Error(
@@ -311,6 +346,56 @@ export class InstagramClient {
 			takenAt: Utils.formatTimestamp(info.taken_at),
 			takenAtTimestamp: info.taken_at,
 		};
+	}
+
+	/**
+	 * Fallback used when the mobile private API is blocked with
+	 * `checkpoint_required`. Reuses whatever cookies are already in the
+	 * client's cookie jar (regardless of whether login() got there via
+	 * Username/Password, Session Data, or Session ID + CSRF Token) and makes
+	 * a plain authenticated HTTP request with browser-style headers, exactly
+	 * like opening the link in a logged-in browser tab.
+	 *
+	 * This is inherently more fragile than the private API (it scrapes
+	 * meta tags out of HTML, so Instagram changing its page markup can break
+	 * it), and doesn't have access to exact like/comment counts or view
+	 * counts the way the private API does - those are parsed best-effort
+	 * from the page description and may be 0/null if the format doesn't
+	 * match what's expected.
+	 */
+	private async getPostByUrlWeb(url: string): Promise<IInstagramPostSummary> {
+		const shortcode = Utils.extractShortcode(url);
+		if (!shortcode) {
+			throw new Error(
+				`Could not find a post/reel shortcode in URL "${url}". Expected something like https://www.instagram.com/reel/SHORTCODE/`,
+			);
+		}
+
+		const sessionId = this.client.state.extractCookieValue('sessionid');
+		const csrfToken = this.client.state.extractCookieValue('csrftoken');
+		if (!sessionId || !csrfToken) {
+			throw new Error('No session cookies available to make an authenticated web request.');
+		}
+
+		const pageUrl = url.endsWith('/') ? url : `${url}/`;
+
+		const response = await fetch(pageUrl, {
+			headers: {
+				Cookie: `sessionid=${sessionId}; csrftoken=${csrfToken}`,
+				'User-Agent':
+					'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+				Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+				'Accept-Language': 'en-US,en;q=0.9',
+				Referer: 'https://www.instagram.com/',
+			},
+		});
+
+		if (!response.ok) {
+			throw new Error(`Instagram returned HTTP ${response.status} for ${pageUrl} (web fallback)`);
+		}
+
+		const html = await response.text();
+		return Utils.parsePostHtml(html, url, shortcode);
 	}
 
 	async saveSession(): Promise<string> {
