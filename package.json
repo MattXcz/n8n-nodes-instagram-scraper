@@ -1,0 +1,78 @@
+{
+  "name": "n8n-nodes-instagram-scraper",
+  "version": "0.1.0",
+  "description": "n8n community node for extracting Instagram post/reel metadata (title, caption, thumbnail, likes, comments, author, date) via a logged-in session, including age-restricted (18+) content",
+  "license": "MIT",
+  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/n8n-nodes-instagram-scraper",
+  "author": {
+    "name": "YOUR_NAME",
+    "email": "YOUR_EMAIL"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_GITHUB_USERNAME/n8n-nodes-instagram-scraper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_GITHUB_USERNAME/n8n-nodes-instagram-scraper/issues"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/nodes/InstagramCredentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Instagram.node.js"
+    ]
+  },
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "instagram",
+    "scraper",
+    "metadata",
+    "social-media",
+    "automation",
+    "workflow",
+    "instagram-private-api"
+  ],
+  "files": [
+    "dist/**/*",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "build": "tsc && npm run copy-assets",
+    "copy-assets": "mkdir -p dist/nodes && cp -r src/nodes/*.svg dist/nodes/ 2>/dev/null || true",
+    "dev": "tsc --watch",
+    "format": "prettier src --write",
+    "lint": "eslint src/**/*.ts --max-warnings 3",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "prepublishOnly": "npm run build",
+    "test": "jest"
+  },
+  "dependencies": {
+    "instagram-private-api": "^1.45.3"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.5",
+    "@types/node": "^18.19.1",
+    "@typescript-eslint/eslint-plugin": "^6.7.0",
+    "@typescript-eslint/parser": "^6.7.0",
+    "eslint": "^8.57.1",
+    "eslint-plugin-n8n-nodes-base": "^1.16.3",
+    "jest": "^29.6.4",
+    "n8n-workflow": "^1.0.0",
+    "prettier": "^3.5.3",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.2.2"
+  },
+  "peerDependencies": {
+    "n8n-workflow": ">=1.0.0"
+  }
+}
