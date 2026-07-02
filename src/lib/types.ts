@@ -112,6 +112,30 @@ export interface IInstagramMediaInfo {
 		height: number;
 	}>;
 	carousel_media?: IInstagramCarouselItem[];
+	/** Raw "top comments" preview Instagram includes with media info, without a separate comment.list() call. */
+	preview_comments?: IInstagramRawComment[];
+}
+
+/**
+ * Minimal shape of an entry in Instagram's `preview_comments` array (the
+ * top/pinned comments shown under a post). Untyped upstream (`any[]`), so
+ * only the fields we actually read are declared here.
+ */
+export interface IInstagramRawComment {
+	pk?: string;
+	text?: string;
+	comment_like_count?: number;
+	user?: {
+		username?: string;
+		full_name?: string;
+	};
+}
+
+/** Flat summary of a post's top comment, as returned in IInstagramPostSummary. */
+export interface IInstagramTopComment {
+	text: string;
+	author: string;
+	likeCount: number;
 }
 
 /**
@@ -125,11 +149,13 @@ export interface IInstagramPostSummary {
 	title: string;
 	description: string;
 	thumbnail: string;
+	videoUrl: string | null;
 	isVideo: boolean;
 	mediaType: 'photo' | 'video' | 'carousel' | 'unknown';
 	likeCount: number;
 	commentCount: number;
 	viewCount: number | null;
+	topComment: IInstagramTopComment | null;
 	author: string;
 	authorFullName: string;
 	takenAt: string;

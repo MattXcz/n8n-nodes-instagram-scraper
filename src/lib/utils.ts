@@ -1,4 +1,4 @@
-import { RetryOptions, IInstagramPostSummary } from './types';
+import { RetryOptions, IInstagramPostSummary, IInstagramRawComment, IInstagramTopComment } from './types';
 
 /**
  * Utility functions for Instagram n8n integration
@@ -133,6 +133,39 @@ export class Utils {
 	}
 
 	/**
+	 * Picks the highest-resolution candidate from a video_versions array.
+	 * Unlike image_versions2, video_versions is a flat array (no "candidates"
+	 * wrapper) and Instagram doesn't guarantee it's sorted by quality, so pick
+	 * explicitly by width rather than assuming index 0 is the best one.
+	 */
+	static bestVideoUrl(videoVersions?: Array<{ url: string; width: number; height: number }>): string | null {
+		if (!videoVersions || videoVersions.length === 0) {
+			return null;
+		}
+		return videoVersions.reduce((best, current) => (current.width > best.width ? current : best)).url;
+	}
+
+	/**
+	 * Flattens the first entry of Instagram's `preview_comments` (the
+	 * top/pinned comments shown under a post, included with media info at no
+	 * extra request) into a simple { text, author, likeCount } shape.
+	 */
+	static topCommentFromPreview(previewComments?: IInstagramRawComment[]): IInstagramTopComment | null {
+		if (!previewComments || previewComments.length === 0) {
+			return null;
+		}
+		const top = previewComments[0];
+		if (!top || !top.text) {
+			return null;
+		}
+		return {
+			text: top.text,
+			author: top.user?.username ?? '',
+			likeCount: top.comment_like_count ?? 0,
+		};
+	}
+
+	/**
 	 * Decodes HTML entities commonly found in meta tag content.
 	 */
 	static decodeHtmlEntities(text: string): string {
@@ -206,11 +239,13 @@ export class Utils {
 			title: ogTitle || caption.split('\n')[0].trim() || 'Instagram post',
 			description: caption,
 			thumbnail,
+			videoUrl: null,
 			isVideo,
 			mediaType: isVideo ? 'video' : 'photo',
 			likeCount,
 			commentCount,
 			viewCount: null,
+			topComment: null,
 			author,
 			authorFullName: '',
 			takenAt: '',

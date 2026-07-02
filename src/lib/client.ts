@@ -1,4 +1,5 @@
 import { IgApiClient } from 'instagram-private-api';
+import { fetch as undiciFetch, ProxyAgent, type RequestInit as UndiciRequestInit, type Response as UndiciResponse } from 'undici';
 import {
 	IInstagramCredentials,
 	IInstagramMediaItem,
@@ -13,12 +14,116 @@ import { Utils } from './utils';
 export class InstagramClient {
 	private client: IgApiClient;
 	private isAuthenticated: boolean = false;
+	private proxyUrl?: string;
 
 	constructor(credentials?: IInstagramCredentials) {
 		this.client = new IgApiClient();
 		if (credentials?.proxyUrl) {
 			this.client.state.proxyUrl = credentials.proxyUrl;
+			this.proxyUrl = credentials.proxyUrl;
 		}
+	}
+
+	/**
+	 * Plain `fetch()` never picks up `client.state.proxyUrl` - that setting is
+	 * only honored by instagram-private-api's own `request`-based HTTP client.
+	 * The web-fallback calls below use `fetch()` directly, so without this
+	 * they'd silently bypass the configured proxy while the private API calls
+	 * go through it - a mismatch that either defeats the point of the proxy
+	 * (e.g. IP-based rate limiting/geofencing) or, if the host itself has no
+	 * direct route to the internet and depends on the proxy, fails outright
+	 * with Node's generic, cause-less "fetch failed".
+	 *
+	 * Also unwraps that generic message: Node's fetch (undici) only ever
+	 * throws "fetch failed" and puts the actual reason (DNS failure,
+	 * connection refused, TLS error, etc.) on `error.cause`, which n8n never
+	 * shows on its own.
+	 */
+	private async fetchWithProxy(url: string, options: UndiciRequestInit): Promise<UndiciResponse> {
+		try {
+			if (this.proxyUrl) {
+				return await undiciFetch(url, { ...options, dispatcher: new ProxyAgent(this.proxyUrl) });
+			}
+			return await undiciFetch(url, options);
+		} catch (error) {
+			const cause = error instanceof Error && (error as any).cause ? Utils.formatError((error as any).cause) : undefined;
+			const baseMessage = Utils.formatError(error);
+			throw new Error(
+				cause ? `${baseMessage} (${url}): ${cause}` : `${baseMessage} (${url})`,
+			);
+		}
+	}
+
+	/**
+	 * Cookie-jar-aware GET for the www.instagram.com web app, following
+	 * redirects manually instead of leaving it to fetch()'s automatic
+	 * `redirect: 'follow'`.
+	 *
+	 * This matters because we build the `Cookie` header ourselves rather than
+	 * from a real browser's managed jar. Instagram's web frontend runs a
+	 * cookie-bootstrapping dance for sessions it doesn't fully recognize yet -
+	 * it responds with a redirect *and* a `Set-Cookie` (e.g. `mid`, `ig_did`,
+	 * `datr`, `csrftoken`), expecting the next hop to carry that new cookie
+	 * back. Automatic `fetch()` redirect handling resends the exact same
+	 * static `Cookie` header we set on the first request, never picking up
+	 * those intermediate `Set-Cookie`s, so the dance never completes and
+	 * Instagram just keeps redirecting until fetch gives up with the opaque
+	 * "redirect count exceeded". Feeding every `Set-Cookie` back into
+	 * `client.state.cookieJar` and rebuilding the `Cookie` header from the jar
+	 * before each hop lets that dance actually finish.
+	 */
+	private async fetchInstagramWeb(initialUrl: string, extraHeaders: Record<string, string> = {}): Promise<UndiciResponse> {
+		const maxHops = 8;
+		let currentUrl = initialUrl;
+
+		for (let hop = 0; hop <= maxHops; hop++) {
+			const cookieHeader: string = this.client.state.cookieJar.getCookieString(currentUrl);
+
+			const response = await this.fetchWithProxy(currentUrl, {
+				redirect: 'manual',
+				headers: {
+					...extraHeaders,
+					...(cookieHeader ? { Cookie: cookieHeader } : {}),
+				},
+			});
+
+			const setCookieHeaders: string[] =
+				typeof (response.headers as any).getSetCookie === 'function' ? (response.headers as any).getSetCookie() : [];
+			for (const header of setCookieHeaders) {
+				try {
+					this.client.state.cookieJar.setCookie(header, currentUrl);
+				} catch {
+					// Ignore cookies the jar rejects (e.g. domain mismatch) - don't
+					// abort the whole request over a single cookie.
+				}
+			}
+
+			if (response.status >= 300 && response.status < 400) {
+				const location = response.headers.get('location');
+				if (!location) {
+					throw new Error(`Instagram returned a redirect (HTTP ${response.status}) from ${currentUrl} with no Location header.`);
+				}
+				const nextUrl = new URL(location, currentUrl).toString();
+
+				if (/\/accounts\/login\/|\/challenge\//.test(nextUrl)) {
+					throw new Error(
+						`Instagram redirected the web fallback request to ${nextUrl} - the session was not accepted for web access. Log in through a real browser with this account, then provide fresh Session ID + CSRF Token cookies in the credential instead of relying on the automatic Username/Password login for this content.`,
+					);
+				}
+				if (hop === maxHops) {
+					throw new Error(
+						`Instagram kept redirecting the web fallback request (${maxHops} hops, last redirect to ${nextUrl}) without resolving. The session may be invalid for web access - try fresh Session ID + CSRF Token cookies instead.`,
+					);
+				}
+				currentUrl = nextUrl;
+				continue;
+			}
+
+			return response;
+		}
+
+		// Unreachable - the loop above always returns or throws.
+		throw new Error(`Instagram redirected the web fallback request too many times for ${initialUrl}.`);
 	}
 
 	/**
@@ -39,6 +144,7 @@ export class InstagramClient {
 		try {
 			if (credentials.proxyUrl) {
 				this.client.state.proxyUrl = credentials.proxyUrl;
+				this.proxyUrl = credentials.proxyUrl;
 			}
 
 			if (credentials.sessionData && credentials.sessionData.trim()) {
@@ -170,7 +276,21 @@ export class InstagramClient {
 			// ignore - we only care about the parsedAuthorization side effect
 		}
 
-		return (this.client.state as any).parsedAuthorization?.sessionid;
+		const bearerSessionId: string | undefined = (this.client.state as any).parsedAuthorization?.sessionid;
+		if (bearerSessionId) {
+			// Bearer-token logins never put "sessionid" in the cookie jar, but
+			// fetchInstagramWeb() builds its Cookie header from the jar - write
+			// it in once so subsequent web requests actually send it.
+			try {
+				this.client.state.cookieJar.setCookie(
+					`sessionid=${bearerSessionId}; Domain=.instagram.com; Path=/; Secure; HttpOnly`,
+					'https://www.instagram.com',
+				);
+			} catch {
+				// non-fatal - worst case the explicit header fallback below is used
+			}
+		}
+		return bearerSessionId;
 	}
 
 	/**
@@ -181,38 +301,32 @@ export class InstagramClient {
 	 * by loading the homepage (with whatever session cookie we do have) and
 	 * reading the csrftoken cookie Instagram sets in response.
 	 */
-	private async getCsrfTokenForWebRequest(sessionId: string): Promise<string | undefined> {
+	private async getCsrfTokenForWebRequest(_sessionId: string): Promise<string | undefined> {
 		const cookieValue = await this.getRawCookieValue('csrftoken');
 		if (cookieValue) {
 			return cookieValue;
 		}
 
 		try {
-			const response = await fetch('https://www.instagram.com/', {
-				headers: {
-					Cookie: `sessionid=${sessionId}`,
-					'User-Agent':
-						'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-					Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-				},
+			// fetchInstagramWeb() feeds every Set-Cookie header (including
+			// csrftoken, which Instagram may only issue after a couple of
+			// redirect hops) back into the cookie jar as it follows redirects,
+			// so once it resolves we can just read the token straight out of
+			// the jar instead of parsing headers by hand.
+			await this.fetchInstagramWeb('https://www.instagram.com/', {
+				'User-Agent':
+					'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+				Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 			});
-
-			const setCookieHeaders: string[] =
-				typeof (response.headers as any).getSetCookie === 'function'
-					? (response.headers as any).getSetCookie()
-					: [response.headers.get('set-cookie') ?? ''];
-
-			for (const header of setCookieHeaders) {
-				const match = header.match(/csrftoken=([^;]+)/);
-				if (match) {
-					return match[1];
-				}
-			}
-		} catch {
-			// fall through - caller surfaces the "missing" error below
+		} catch (error) {
+			// A network-level failure (DNS, connection, proxy, TLS, redirect
+			// loop, etc.) is a different problem than "Instagram just didn't
+			// set the cookie" - surface it as-is instead of masking it behind
+			// the generic "csrftoken: missing" message below.
+			throw new Error(`Failed to fetch CSRF token from Instagram: ${Utils.formatError(error)}`);
 		}
 
-		return undefined;
+		return this.getRawCookieValue('csrftoken');
 	}
 
 	/**
@@ -359,6 +473,7 @@ export class InstagramClient {
 				image_versions2: item.image_versions2,
 				video_versions: item.video_versions || [],
 				carousel_media: item.carousel_media,
+				preview_comments: item.preview_comments || [],
 			};
 		} catch (error) {
 			throw new Error(`Failed to get media info: ${Utils.formatError(error)}`);
@@ -418,6 +533,14 @@ export class InstagramClient {
 			thumbnail = Utils.bestImageUrl(info.carousel_media[0].image_versions2);
 		}
 
+		// Same fallback pattern as thumbnail above, but for the playable video
+		// file: the item's own video_versions, else the first carousel item's
+		// (for carousels that lead with a video/reel-style clip).
+		let videoUrl = Utils.bestVideoUrl(info.video_versions);
+		if (!videoUrl && info.carousel_media && info.carousel_media.length > 0) {
+			videoUrl = Utils.bestVideoUrl(info.carousel_media[0].video_versions);
+		}
+
 		const caption = info.caption ?? '';
 		const firstLine = caption.split('\n')[0].trim();
 
@@ -428,11 +551,13 @@ export class InstagramClient {
 			title: firstLine || caption.slice(0, 100) || `Instagram post by @${info.user.username}`,
 			description: caption,
 			thumbnail,
+			videoUrl,
 			isVideo,
 			mediaType,
 			likeCount: info.like_count ?? 0,
 			commentCount: info.comment_count ?? 0,
 			viewCount: info.view_count ?? info.play_count ?? null,
+			topComment: Utils.topCommentFromPreview(info.preview_comments),
 			author: info.user.username,
 			authorFullName: info.user.full_name,
 			takenAt: Utils.formatTimestamp(info.taken_at),
@@ -478,18 +603,19 @@ export class InstagramClient {
 		const mediaId = Utils.shortcodeToMediaId(shortcode);
 		const apiUrl = `https://www.instagram.com/api/v1/media/${mediaId}/info/`;
 
-		const response = await fetch(apiUrl, {
-			headers: {
-				Cookie: `sessionid=${sessionId}; csrftoken=${csrfToken}`,
-				'User-Agent':
-					'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-				Accept: '*/*',
-				'Accept-Language': 'en-US,en;q=0.9',
-				Referer: `https://www.instagram.com/reel/${shortcode}/`,
-				'X-IG-App-ID': '936619743392459',
-				'X-CSRFToken': csrfToken,
-				'X-Requested-With': 'XMLHttpRequest',
-			},
+		// Cookie header is built from the jar (which by now holds sessionid,
+		// csrftoken, and whatever other cookies Instagram issued along the
+		// way) inside fetchInstagramWeb() - only headers that aren't cookies
+		// need to be passed explicitly here.
+		const response = await this.fetchInstagramWeb(apiUrl, {
+			'User-Agent':
+				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+			Accept: '*/*',
+			'Accept-Language': 'en-US,en;q=0.9',
+			Referer: `https://www.instagram.com/reel/${shortcode}/`,
+			'X-IG-App-ID': '936619743392459',
+			'X-CSRFToken': csrfToken,
+			'X-Requested-With': 'XMLHttpRequest',
 		});
 
 		const rawBody = await response.text();
@@ -529,6 +655,11 @@ export class InstagramClient {
 			thumbnail = Utils.bestImageUrl(item.carousel_media[0].image_versions2);
 		}
 
+		let videoUrl = Utils.bestVideoUrl(item.video_versions);
+		if (!videoUrl && item.carousel_media && item.carousel_media.length > 0) {
+			videoUrl = Utils.bestVideoUrl(item.carousel_media[0].video_versions);
+		}
+
 		const caption = item.caption?.text ?? '';
 		const firstLine = caption.split('\n')[0].trim();
 
@@ -539,11 +670,13 @@ export class InstagramClient {
 			title: firstLine || caption.slice(0, 100) || `Instagram post by @${item.user?.username ?? ''}`,
 			description: caption,
 			thumbnail,
+			videoUrl,
 			isVideo,
 			mediaType,
 			likeCount: item.like_count ?? 0,
 			commentCount: item.comment_count ?? 0,
 			viewCount: item.view_count ?? item.play_count ?? null,
+			topComment: Utils.topCommentFromPreview(item.preview_comments),
 			author: item.user?.username ?? '',
 			authorFullName: item.user?.full_name ?? '',
 			takenAt: item.taken_at ? Utils.formatTimestamp(item.taken_at) : '',

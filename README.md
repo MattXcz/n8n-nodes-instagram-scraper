@@ -4,11 +4,11 @@ n8n community node that extracts Instagram post/reel metadata (title, caption, t
 
 This is a fork of [n8n-nodes-instagram-private-api-wrapped](https://github.com/tiagohintz/n8n-nodes-instagram-private-api-wrapped) by tiagohintz (MIT licensed), trimmed down and extended specifically for metadata scraping:
 
-- Added **Post -> Get Info by URL**: paste any `instagram.com/p|reel|reels|tv/<shortcode>` URL and get back a flat, ready-to-use object (`title`, `description`, `thumbnail`, `likeCount`, `commentCount`, `viewCount`, `author`, `authorFullName`, `takenAt`, `mediaType`, `isVideo`).
+- Added **Post -> Get Info by URL**: paste any `instagram.com/p|reel|reels|tv/<shortcode>` URL and get back a flat, ready-to-use object (`title`, `description`, `thumbnail`, `videoUrl`, `likeCount`, `commentCount`, `viewCount`, `topComment`, `author`, `authorFullName`, `takenAt`, `mediaType`, `isVideo`).
 - Shortcode -> media ID conversion is done locally (same algorithm Instagram itself uses), so unlike GraphQL-based scrapers this doesn't depend on Instagram's `doc_id`, which rotates every few weeks and breaks those scrapers.
 - Removed operations unrelated to metadata scraping (posting, liking, follow/unfollow, direct messages) to keep the node small and the maintenance surface minimal.
 - Automatic login + session caching: fill in Username/Password once in the credential and the node handles everything else — it logs in on first use, caches the resulting session in the workflow's static data, and reuses it on every later execution, only logging in again if that cached session ever expires or gets rejected.
-- Automatic web fallback: if the mobile private API returns `checkpoint_required` for a specific post/reel (this can happen for restricted/sensitive content even with a fully valid session, since Instagram scrutinizes mobile-app-style requests more than web traffic), the node automatically retries the same underlying endpoint using web-style headers (`X-IG-App-ID`, the same public ID instagram.com's own frontend uses) instead of the mobile app's signed-request scheme — the same access pattern the website itself uses internally, not something recognizable as "mobile app" traffic. Returns the same structured data as the primary path.
+- Automatic web fallback: if the mobile private API returns `checkpoint_required` for a specific post/reel (this can happen for restricted/sensitive content even with a fully valid session, since Instagram scrutinizes mobile-app-style requests more than web traffic), the node automatically retries the same underlying endpoint using web-style headers (`X-IG-App-ID`, the same public ID instagram.com's own frontend uses) instead of the mobile app's signed-request scheme — the same access pattern the website itself uses internally, not something recognizable as "mobile app" traffic. It follows Instagram's cookie-bootstrapping redirects itself (accumulating whatever cookies Instagram sets along the way) rather than relying on a single static cookie header, and returns the same structured data as the primary path.
 
 ## Authentication
 
@@ -34,6 +34,10 @@ There's also a **Session Data (Advanced)** field for pasting a manually generate
 
 **Security note:** treat all of these values (password, session cookies, session data) like they are the account's password — because they effectively are. Store credentials only in n8n's encrypted credential store, never commit them to git, and don't paste them anywhere else.
 
+### Proxy (optional)
+
+**Proxy URL** in the credential (e.g. `http://proxy.example.com:8080`) routes both the private API requests and the web fallback requests through the same HTTP proxy. Use it if the machine running n8n has no direct route to instagram.com and needs a proxy for any outbound request to succeed, or if you want IP-based checkpoint/rate-limit risk spread across a residential/rotating proxy instead of the n8n host's own IP. Leave it empty for a normal direct connection.
+
 ## Installation
 
 ### Option A: Community Nodes UI (after you publish to npm)
@@ -54,7 +58,9 @@ Copy the whole folder (or just `dist/`, `package.json`, `README.md`, `LICENSE`) 
 1. Add the **Instagram Scraper** node to your workflow.
 2. Resource: `Post`, Operation: `Get Info by URL`.
 3. URL: `{{ $json.url }}` or a hard-coded post/reel link.
-4. Output fields: `title`, `description`, `thumbnail`, `likeCount`, `commentCount`, `viewCount`, `author`, `authorFullName`, `takenAt`, `mediaType`, `isVideo`.
+4. Output fields: `title`, `description`, `thumbnail`, `videoUrl`, `likeCount`, `commentCount`, `viewCount`, `topComment` (`{ text, author, likeCount }` of the top/pinned comment, or `null` if there are none), `author`, `authorFullName`, `takenAt`, `mediaType`, `isVideo`.
+
+`videoUrl` is the direct link to the highest-quality video file for reels/videos (and for carousels that lead with one), or `null` for photo posts. Both `thumbnail` and `videoUrl` are temporary, signed CDN URLs — download or forward them promptly, they expire.
 
 ## Maintenance
 
@@ -65,6 +71,13 @@ Instagram can change its private API at any time without notice; this is an unof
 3. Whether Instagram flagged the account with a `checkpoint_required` on a specific post (the node retries automatically via the web fallback described above) or account-wide (wait 24-48h, complete any prompt in the app, or use a different account).
 
 If you ever need to force a fresh login (e.g. after switching accounts), clear the workflow's static data by deactivating/reactivating the workflow, or simply change the Username in the credential.
+
+### Troubleshooting network errors
+
+A bare `fetch failed` error message means the underlying cause wasn't surfaced — as of this version, network-level failures from the web fallback include the real reason (e.g. DNS failure, connection refused, TLS error) in the error message instead of that generic text. If you see:
+
+- `... : redirect count exceeded` or a message about being redirected to `/accounts/login/` or `/challenge/` — the session isn't accepted for web access. Log in through a real browser with the account, then use the Session ID + CSRF Token fields instead of Username/Password for that content.
+- A DNS/connection-level message — check that the n8n host can reach `www.instagram.com` directly, or set **Proxy URL** in the credential.
 
 ## License
 
