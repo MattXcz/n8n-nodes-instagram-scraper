@@ -19,7 +19,7 @@ Instagram aggressively rate-limits and flags direct username/password logins fro
 
 ### Option A: Community Nodes UI (after you publish to npm)
 
-Settings -> Community Nodes -> Install -> package name: `n8n-nodes-instagram-scraper`
+Settings -> Community Nodes -> Install -> package name: `@mattxcz/n8n-nodes-instagram-scraper`
 
 ### Option B: Custom extensions folder (private, no npm needed)
 
