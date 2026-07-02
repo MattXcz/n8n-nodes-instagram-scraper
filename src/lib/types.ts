@@ -1,5 +1,6 @@
 export interface IInstagramCredentials {
-	sessionData: string;
+	sessionId: string;
+	csrfToken: string;
 	proxyUrl?: string;
 }
 

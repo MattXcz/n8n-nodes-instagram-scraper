@@ -15,46 +15,62 @@ export class InstagramClient {
 
 	constructor(credentials?: IInstagramCredentials) {
 		this.client = new IgApiClient();
-		if (credentials) {
-			// Generate a generic device since we don't have username
-			this.client.state.generateDevice('instagram_user');
-			if (credentials.proxyUrl) {
-				this.client.state.proxyUrl = credentials.proxyUrl;
-			}
+		if (credentials?.proxyUrl) {
+			this.client.state.proxyUrl = credentials.proxyUrl;
 		}
 	}
 
-	async authenticate(credentials: IInstagramCredentials): Promise<void> {
+	/**
+	 * Authenticate by directly injecting the "sessionid" and "csrftoken"
+	 * cookies copied from a logged-in browser (DevTools -> Application ->
+	 * Cookies -> instagram.com). No JSON wrangling required.
+	 *
+	 * The numeric Instagram user ID ("ds_user_id") is derived automatically
+	 * from the sessionid cookie, which always starts with "<user_id>%3A...".
+	 */
+	async login(credentials: IInstagramCredentials): Promise<void> {
 		try {
+			if (!credentials.sessionId || !credentials.csrfToken) {
+				throw new Error(
+					'Both Session ID and CSRF Token are required. Copy them from the "sessionid" and "csrftoken" cookies of a browser logged into Instagram.',
+				);
+			}
 			if (credentials.proxyUrl) {
 				this.client.state.proxyUrl = credentials.proxyUrl;
 			}
 
-			if (!credentials.sessionData) {
+			const userId = credentials.sessionId.split('%3A')[0];
+			if (!userId || !/^\d+$/.test(userId)) {
 				throw new Error(
-					'Session data is required. Extract it from a logged-in browser session (sessionid + csrftoken cookies) and paste it as JSON.',
+					'Could not read a numeric user ID from the start of the Session ID. Make sure you copied the full "sessionid" cookie value, including the %3A parts.',
 				);
 			}
 
+			// Device IDs must be deterministic for a given account, otherwise
+			// Instagram may treat every request as coming from a new device.
+			this.client.state.generateDevice(userId);
+
+			const cookieUrl = 'https://i.instagram.com';
+			await this.client.state.cookieJar.setCookie(
+				`sessionid=${credentials.sessionId}; Domain=.instagram.com; Path=/; Secure; HttpOnly`,
+				cookieUrl,
+			);
+			await this.client.state.cookieJar.setCookie(
+				`csrftoken=${credentials.csrfToken}; Domain=.instagram.com; Path=/; Secure`,
+				cookieUrl,
+			);
+			await this.client.state.cookieJar.setCookie(
+				`ds_user_id=${userId}; Domain=.instagram.com; Path=/; Secure`,
+				cookieUrl,
+			);
+
 			try {
-				const sessionData =
-					typeof credentials.sessionData === 'string'
-						? JSON.parse(credentials.sessionData)
-						: credentials.sessionData;
-
-				await this.client.state.deserialize(sessionData);
-
-				// Verify session is still valid
-				const userInfo = await this.client.user.info(this.client.state.cookieUserId);
-				void userInfo;
-
+				// Verify the session actually works before reporting success.
+				await this.client.user.info(userId);
 				this.isAuthenticated = true;
-				return;
-			} catch (sessionError) {
+			} catch (verifyError) {
 				throw new Error(
-					`Invalid or expired session data. Please extract a fresh session and update your credentials. Error: ${
-						sessionError instanceof Error ? sessionError.message : 'Unknown error'
-					}`,
+					`Session ID / CSRF Token were rejected by Instagram: ${Utils.formatError(verifyError)}`,
 				);
 			}
 		} catch (error) {
@@ -64,16 +80,14 @@ export class InstagramClient {
 				const errorMessage = error.message.toLowerCase();
 
 				if (errorMessage.includes('login_required') || errorMessage.includes('unauthorized')) {
-					throw new Error(
-						'Session expired or invalid. Extract a fresh session and update your credentials.',
-					);
+					throw new Error('Session expired or invalid. Copy fresh sessionid/csrftoken cookie values and update your credentials.');
 				} else if (errorMessage.includes('challenge_required')) {
 					throw new Error(
-						'Instagram session requires verification. Log in through the app, complete any challenge, then extract a fresh session.',
+						'Instagram session requires verification. Log in through the app, complete any challenge, then copy fresh cookie values.',
 					);
 				} else if (errorMessage.includes('checkpoint_required')) {
 					throw new Error(
-						'Instagram account requires verification. Complete it in the app, wait 24-48h, then extract a fresh session.',
+						'Instagram account requires verification. Complete it in the app, wait 24-48h, then copy fresh cookie values.',
 					);
 				} else if (errorMessage.includes('429') || errorMessage.includes('too many requests')) {
 					throw new Error('Rate limited by Instagram. Wait a few hours and try again.');
@@ -82,31 +96,6 @@ export class InstagramClient {
 			}
 			throw new Error('Authentication failed: Unknown error occurred.');
 		}
-	}
-
-	async authenticateWithRetry(credentials: IInstagramCredentials, maxRetries: number = 3): Promise<void> {
-		let lastError: Error | null = null;
-
-		for (let attempt = 1; attempt <= maxRetries; attempt++) {
-			try {
-				if (attempt > 1) {
-					const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
-					await Utils.delay(delay);
-				}
-				await this.authenticate(credentials);
-				return;
-			} catch (error) {
-				lastError = error instanceof Error ? error : new Error('Unknown error');
-
-				if (
-					lastError.message.includes('challenge_required') ||
-					lastError.message.includes('checkpoint_required')
-				) {
-					throw lastError;
-				}
-			}
-		}
-		throw new Error(`Authentication failed after ${maxRetries} attempts. Last error: ${lastError?.message ?? 'Unknown error'}`);
 	}
 
 	private ensureAuthenticated(): void {
@@ -265,6 +254,11 @@ export class InstagramClient {
 		}
 	}
 
+	/**
+	 * Restore a previously saved full state (from saveSession()). Useful if
+	 * you want to persist device IDs between executions instead of
+	 * regenerating them from the cookies every time.
+	 */
 	async loadSession(sessionData: string): Promise<void> {
 		try {
 			const parsed = typeof sessionData === 'string' ? JSON.parse(sessionData) : sessionData;

@@ -201,7 +201,7 @@ export class Instagram implements INodeType {
 		const client = new InstagramClient(credentials);
 
 		try {
-			await client.loadSession(credentials.sessionData);
+			await client.login(credentials);
 		} catch (error) {
 			throw new NodeOperationError(
 				this.getNode(),
