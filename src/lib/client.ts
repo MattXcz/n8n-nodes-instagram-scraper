@@ -6,6 +6,7 @@ import {
 	IInstagramTimelineFeed,
 	IInstagramMediaInfo,
 	IInstagramPostSummary,
+	IInstagramLoginResult,
 } from './types';
 import { Utils } from './utils';
 
@@ -21,22 +22,40 @@ export class InstagramClient {
 	}
 
 	/**
-	 * Authenticate by directly injecting the "sessionid" and "csrftoken"
+	 * Authenticate the client. Prefers the trusted `sessionData` (produced
+	 * automatically by loginWithPassword, cached, and passed back in here)
+	 * and falls back to directly injecting the "sessionid" + "csrftoken"
 	 * cookies copied from a logged-in browser (DevTools -> Application ->
-	 * Cookies -> instagram.com). No JSON wrangling required.
+	 * Cookies -> instagram.com).
 	 *
-	 * The numeric Instagram user ID ("ds_user_id") is derived automatically
-	 * from the sessionid cookie, which always starts with "<user_id>%3A...".
+	 * The cookie-injection fallback is more prone to triggering Instagram's
+	 * `checkpoint_required` anti-fraud response, since it grafts a web-origin
+	 * session cookie onto a freshly-generated, never-before-seen "device" —
+	 * a mismatch Instagram's fraud detection is specifically tuned to catch.
+	 * `sessionData` avoids this because its device fingerprint was created by
+	 * the same login that produced the session.
 	 */
 	async login(credentials: IInstagramCredentials): Promise<void> {
 		try {
-			if (!credentials.sessionId || !credentials.csrfToken) {
-				throw new Error(
-					'Both Session ID and CSRF Token are required. Copy them from the "sessionid" and "csrftoken" cookies of a browser logged into Instagram.',
-				);
-			}
 			if (credentials.proxyUrl) {
 				this.client.state.proxyUrl = credentials.proxyUrl;
+			}
+
+			if (credentials.sessionData && credentials.sessionData.trim()) {
+				await this.loadSession(credentials.sessionData);
+				try {
+					await this.client.user.info(this.client.state.cookieUserId);
+				} catch (verifyError) {
+					this.isAuthenticated = false;
+					throw new Error(`Session Data was rejected by Instagram: ${Utils.formatError(verifyError)}`);
+				}
+				return;
+			}
+
+			if (!credentials.sessionId || !credentials.csrfToken) {
+				throw new Error(
+					'Provide either Username + Password (recommended), Session Data, or both Session ID and CSRF Token.',
+				);
 			}
 
 			const userId = credentials.sessionId.split('%3A')[0];
@@ -101,6 +120,54 @@ export class InstagramClient {
 	private ensureAuthenticated(): void {
 		if (!this.isAuthenticated) {
 			throw new Error('Client is not authenticated. Please call authenticate() first.');
+		}
+	}
+
+	/**
+	 * Real login with username + password, using the same pre/post-login flow
+	 * simulation as the official Instagram app. Returns a serialized session
+	 * (`sessionData`) that the node caches in the workflow's static data, so
+	 * this only needs to run again once that cached session eventually
+	 * expires or gets rejected — not on every execution. This is more
+	 * trusted by Instagram than grafting a browser sessionid cookie onto a
+	 * fresh device, so it's much less likely to trigger `checkpoint_required`.
+	 */
+	async loginWithPassword(username: string, password: string): Promise<IInstagramLoginResult> {
+		try {
+			// Deterministic per-username device, so re-running this later
+			// (e.g. after a session expires) reuses the same fingerprint.
+			this.client.state.generateDevice(username);
+
+			await this.client.simulate.preLoginFlow();
+			const loggedInUser = await this.client.account.login(username, password);
+			await this.client.simulate.postLoginFlow();
+
+			const sessionData = JSON.stringify(await this.client.state.serialize());
+			this.isAuthenticated = true;
+
+			return {
+				sessionData,
+				userId: loggedInUser.pk.toString(),
+				username: loggedInUser.username,
+			};
+		} catch (error) {
+			this.isAuthenticated = false;
+			const message = Utils.formatError(error).toLowerCase();
+
+			if (message.includes('two_factor') || message.includes('two-factor') || message.includes('checkpoint_challenge_required')) {
+				throw new Error(
+					'This account needs an extra verification step (2FA or a challenge) that this one-time login cannot complete automatically. Log in once through the Instagram app/browser to clear it, then either retry this operation or use the Session ID + CSRF Token fields instead.',
+				);
+			}
+			if (message.includes('challenge_required')) {
+				throw new Error(
+					'Instagram requires a verification challenge for this login. Open the Instagram app with this account, complete the challenge, then try again.',
+				);
+			}
+			if (message.includes('bad_password') || message.includes('incorrect')) {
+				throw new Error('Instagram rejected the username/password combination.');
+			}
+			throw new Error(`Login failed: ${Utils.formatError(error)}`);
 		}
 	}
 

@@ -1,7 +1,31 @@
 export interface IInstagramCredentials {
-	sessionId: string;
-	csrfToken: string;
+	/**
+	 * Recommended: fill these in and everything else is handled
+	 * automatically. The node performs a real login on first use, caches the
+	 * resulting session in the workflow's static data, and only logs in
+	 * again if that cached session ever gets rejected by Instagram.
+	 */
+	username?: string;
+	password?: string;
+
+	/** Advanced fallback: cookies copied from an already-logged-in browser. */
+	sessionId?: string;
+	csrfToken?: string;
+
+	/**
+	 * Advanced fallback: a full serialized client state produced by a
+	 * previous login (see InstagramClient.loginWithPassword). Mainly used
+	 * internally for caching; can also be pasted in manually.
+	 */
+	sessionData?: string;
+
 	proxyUrl?: string;
+}
+
+export interface IInstagramLoginResult {
+	sessionData: string;
+	userId: string;
+	username: string;
 }
 
 // Interfaces for n8n node compatibility

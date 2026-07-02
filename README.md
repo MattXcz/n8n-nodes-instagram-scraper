@@ -7,13 +7,31 @@ This is a fork of [n8n-nodes-instagram-private-api-wrapped](https://github.com/t
 - Added **Post -> Get Info by URL**: paste any `instagram.com/p|reel|reels|tv/<shortcode>` URL and get back a flat, ready-to-use object (`title`, `description`, `thumbnail`, `likeCount`, `commentCount`, `viewCount`, `author`, `authorFullName`, `takenAt`, `mediaType`, `isVideo`).
 - Shortcode -> media ID conversion is done locally (same algorithm Instagram itself uses), so unlike GraphQL-based scrapers this doesn't depend on Instagram's `doc_id`, which rotates every few weeks and breaks those scrapers.
 - Removed operations unrelated to metadata scraping (posting, liking, follow/unfollow, direct messages) to keep the node small and the maintenance surface minimal.
-- Session-only authentication (no username/password stored anywhere), same as the upstream project — but simplified to two plain credential fields (**Session ID**, **CSRF Token**) instead of a hand-built JSON session blob.
+- Automatic login + session caching: fill in Username/Password once in the credential and the node handles everything else — it logs in on first use, caches the resulting session in the workflow's static data, and reuses it on every later execution, only logging in again if that cached session ever expires or gets rejected.
 
-## Why cookies instead of username/password
+## Authentication
 
-Instagram aggressively rate-limits and flags direct username/password logins from automation tools. Using the `sessionid`/`csrftoken` cookie pair from an already-logged-in browser session is far more reliable and is what every serious Instagram automation library (instagrapi, instagram-private-api, gallery-dl, yt-dlp) does today. The node injects these two cookies straight into the underlying client's cookie jar and derives everything else (device ID, numeric user ID) automatically — no session JSON to assemble by hand.
+### Recommended: Username + Password
 
-**Security note:** treat these cookie values like a password. Whoever has them can act as your Instagram account. Use a dedicated account for automation if possible, store the credential only in n8n's encrypted credential store, and never commit them to git or paste them anywhere else.
+1. Open the **Instagram API** credential and fill in **Username** and **Password**. Use a dedicated automation account if possible, not your main one.
+2. That's it — the first time any operation runs, the node performs a real login (with the same pre/post-login flow simulation the official app does) and caches the resulting session automatically. Every later execution reuses that cached session; the node only logs in again if it ever gets rejected.
+
+This is more trusted by Instagram than a browser cookie, because the device fingerprint behind the session was created by the same login that produced it, so there's no mismatch between "device" and session for Instagram's fraud detection to flag. It also means repeated real logins aren't happening on every single execution, which is itself a pattern Instagram watches for.
+
+### Advanced fallback: browser cookies
+
+If you'd rather not store a password, leave Username/Password empty and instead:
+
+1. Log into instagram.com in your browser with the account you want to use.
+2. Open DevTools -> Application/Storage -> Cookies -> `https://www.instagram.com`.
+3. Copy the raw values of the `sessionid` and `csrftoken` cookies (keep the `%3A` parts in `sessionid` as-is, don't decode them).
+4. Paste them into **Session ID (Advanced)** and **CSRF Token (Advanced)**.
+
+This grafts a web-origin session cookie onto a freshly generated "device", which is exactly the kind of mismatch Instagram's fraud detection is tuned to catch — expect occasional `checkpoint_required` errors. If that happens, either complete the verification in the Instagram app, or switch to Username + Password instead.
+
+There's also a **Session Data (Advanced)** field for pasting a manually generated session; if set, it takes priority over everything else.
+
+**Security note:** treat all of these values (password, session cookies, session data) like they are the account's password — because they effectively are. Store credentials only in n8n's encrypted credential store, never commit them to git, and don't paste them anywhere else.
 
 ## Installation
 
@@ -30,15 +48,6 @@ npm run build
 
 Copy the whole folder (or just `dist/`, `package.json`, `README.md`, `LICENSE`) into your n8n custom extensions directory (commonly `~/.n8n/custom/n8n-nodes-instagram-scraper`), then restart n8n.
 
-## Getting session data
-
-1. Log into instagram.com in your browser with the account you want to use for scraping.
-2. Open DevTools -> Application/Storage -> Cookies -> `https://www.instagram.com`.
-3. Copy the raw values of the `sessionid` and `csrftoken` cookies (keep the `%3A` parts in `sessionid` as-is, don't decode them).
-4. In the n8n credential, paste them into the two plain fields: **Session ID** and **CSRF Token**. No JSON, no extra formatting.
-
-The numeric Instagram user ID is derived automatically from the start of the `sessionid` value, so you don't need to look that up separately.
-
 ## Usage
 
 1. Add the **Instagram Scraper** node to your workflow.
@@ -51,8 +60,10 @@ The numeric Instagram user ID is derived automatically from the start of the `se
 Instagram can change its private API at any time without notice; this is an unofficial, reverse-engineered integration, not the official Graph API. If it stops working, check:
 
 1. Whether `instagram-private-api` has a newer version that fixes it (`npm update instagram-private-api`).
-2. Whether your Session ID / CSRF Token expired (copy fresh values from the browser).
-3. Whether Instagram flagged the account (wait 24-48h, or use a different account).
+2. Whether the cached session expired — with Username/Password set, the node re-logs in automatically; with the cookie fallback, copy fresh values from the browser.
+3. Whether Instagram flagged the account with a `checkpoint_required` (wait 24-48h, complete any prompt in the app, or use a different account).
+
+If you ever need to force a fresh login (e.g. after switching accounts), clear the workflow's static data by deactivating/reactivating the workflow, or simply change the Username in the credential.
 
 ## License
 

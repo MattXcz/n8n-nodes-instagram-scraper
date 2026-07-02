@@ -200,14 +200,52 @@ export class Instagram implements INodeType {
 		const credentials = (await this.getCredentials('instagramApi')) as IInstagramCredentials;
 		const client = new InstagramClient(credentials);
 
+		// Cache the session produced by a real username/password login in the
+		// workflow's static data, so it persists across executions and we
+		// only hit Instagram's login endpoint again when the cached session
+		// actually stops working (repeated automated logins are themselves a
+		// pattern Instagram flags).
+		const staticData = this.getWorkflowStaticData('global') as {
+			instagramSessionData?: string;
+			instagramSessionUsername?: string;
+		};
+
 		try {
-			await client.login(credentials);
+			if (credentials.sessionData && credentials.sessionData.trim()) {
+				// Explicit manual override always wins.
+				await client.login(credentials);
+			} else if (credentials.sessionId && credentials.csrfToken) {
+				// Explicit cookie fallback.
+				await client.login(credentials);
+			} else if (credentials.username && credentials.password) {
+				let usedCache = false;
+				if (
+					staticData.instagramSessionData &&
+					staticData.instagramSessionUsername === credentials.username
+				) {
+					try {
+						await client.login({ ...credentials, sessionData: staticData.instagramSessionData });
+						usedCache = true;
+					} catch {
+						// Cached session expired or was rejected - fall through to a fresh login below.
+					}
+				}
+				if (!usedCache) {
+					const loginResult = await client.loginWithPassword(credentials.username, credentials.password);
+					staticData.instagramSessionData = loginResult.sessionData;
+					staticData.instagramSessionUsername = credentials.username;
+				}
+			} else {
+				throw new Error(
+					'Provide Username + Password (recommended), or Session ID + CSRF Token, or Session Data in the Instagram API credential.',
+				);
+			}
 		} catch (error) {
 			throw new NodeOperationError(
 				this.getNode(),
 				`Instagram authentication failed: ${
 					error instanceof Error ? error.message : 'Unknown error'
-				}. Please extract a fresh session and update your credentials.`,
+				}`,
 				{ itemIndex: 0 },
 			);
 		}
