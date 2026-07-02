@@ -65,4 +65,4 @@ Instagram can change its private API at any time without notice; this is an unof
 
 ## License
 
-MIT — see [LICENSE](./LICENSE). Original work Copyright tiagohintz, modifications Copyright you.
+MIT — see [LICENSE](./LICENSE). Original work Copyright tiagohintz, modifications Copyright Matouš Bečvář.

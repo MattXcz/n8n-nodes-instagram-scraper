@@ -3,17 +3,17 @@
   "version": "0.1.0",
   "description": "n8n community node for extracting Instagram post/reel metadata (title, caption, thumbnail, likes, comments, author, date) via a logged-in session, including age-restricted (18+) content",
   "license": "MIT",
-  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/n8n-nodes-instagram-scraper",
+  "homepage": "https://github.com/MattXcz/n8n-nodes-instagram-scraper",
   "author": {
-    "name": "YOUR_NAME",
-    "email": "YOUR_EMAIL"
+    "name": "Matouš Bečvář",
+    "email": "matous.becvar@eurowag.com"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_GITHUB_USERNAME/n8n-nodes-instagram-scraper.git"
+    "url": "https://github.com/MattXcz/n8n-nodes-instagram-scraper.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_GITHUB_USERNAME/n8n-nodes-instagram-scraper/issues"
+    "url": "https://github.com/MattXcz/n8n-nodes-instagram-scraper/issues"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

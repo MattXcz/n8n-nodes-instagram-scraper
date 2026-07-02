@@ -1,11 +1,7 @@
 MIT License
 
-<<<<<<< HEAD
-Copyright (c) 2026 Matouš Bečvář
-=======
 Copyright (c) 2025 tiagohintz (original n8n-nodes-instagram-private-api-wrapped)
-Copyright (c) 2026 YOUR_NAME (this fork, n8n-nodes-instagram-scraper)
->>>>>>> 1c5c263 (Initial commit: Instagram metadata scraper node for n8n)
+Copyright (c) 2026 Matouš Bečvář (this fork, n8n-nodes-instagram-scraper)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

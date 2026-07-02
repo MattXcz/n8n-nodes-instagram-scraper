@@ -9,7 +9,7 @@ import {
 export class InstagramCredentials implements ICredentialType {
 	name = 'instagramApi';
 	displayName = 'Instagram API';
-	documentationUrl = 'https://github.com/YOUR_GITHUB_USERNAME/n8n-nodes-instagram-scraper';
+	documentationUrl = 'https://github.com/MattXcz/n8n-nodes-instagram-scraper';
 	properties: INodeProperties[] = [
 		{
 			displayName: 'Session Data',
