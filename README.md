@@ -38,6 +38,10 @@ There's also a **Session Data (Advanced)** field for pasting a manually generate
 
 **Proxy URL** in the credential (e.g. `http://proxy.example.com:8080`) routes both the private API requests and the web fallback requests through the same HTTP proxy. Use it if the machine running n8n has no direct route to instagram.com and needs a proxy for any outbound request to succeed, or if you want IP-based checkpoint/rate-limit risk spread across a residential/rotating proxy instead of the n8n host's own IP. Leave it empty for a normal direct connection.
 
+### Multiple items in one run
+
+If several URLs are fed into this node at once (e.g. from a Split In Batches / Loop node), firing all of those requests back-to-back with no gap looks nothing like a human browsing and can get the session `checkpoint_required`-flagged after a few items, even though each one alone would work fine. The node's **Options -> Delay Between Items (ms)** setting (default 2000ms) inserts a randomized delay before item 2 onward to space requests out; raise it if you're still seeing checkpoints on larger batches, or set it to 0 to disable.
+
 ## Installation
 
 ### Option A: Community Nodes UI (after you publish to npm)

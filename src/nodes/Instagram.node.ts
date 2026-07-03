@@ -8,6 +8,7 @@ import {
 
 import { IInstagramCredentials } from '../lib/types';
 import { InstagramClient } from '../lib/client';
+import { Utils } from '../lib/utils';
 
 export class Instagram implements INodeType {
 	description: INodeTypeDescription = {
@@ -187,6 +188,27 @@ export class Instagram implements INodeType {
 				default: '',
 				description: 'Pagination cursor from a previous call (leave empty for the first page)',
 			},
+
+			{
+				displayName: 'Options',
+				name: 'options',
+				type: 'collection',
+				placeholder: 'Add Option',
+				default: {},
+				options: [
+					{
+						displayName: 'Delay Between Items (Ms)',
+						name: 'delayBetweenItems',
+						type: 'number',
+						typeOptions: {
+							minValue: 0,
+						},
+						default: 2000,
+						description:
+							'When multiple items are passed into this node in one run (e.g. from a Split In Batches / Loop node), requests for item 2 onward are delayed by a random amount between this value and 2x this value before running. Instagram flags many requests fired back-to-back from the same session as bot traffic (checkpoint_required) even if each one alone would be fine. Set to 0 to disable.',
+					},
+				],
+			},
 		],
 	};
 
@@ -251,6 +273,21 @@ export class Instagram implements INodeType {
 		}
 
 		for (let i = 0; i < items.length; i++) {
+			// Multiple items in one execution (e.g. from a Split In
+			// Batches / Loop node feeding several URLs into this node at
+			// once) hit Instagram back-to-back with no gap at all, which
+			// looks nothing like a human browsing and gets the session
+			// checkpoint-flagged after a few requests - even though a
+			// single request on its own works fine. Space item 2+ out with
+			// a small randomized delay to look less like a scraper.
+			if (i > 0) {
+				const options = this.getNodeParameter('options', i, {}) as { delayBetweenItems?: number };
+				const delayBetweenItems = options.delayBetweenItems ?? 2000;
+				if (delayBetweenItems > 0) {
+					await Utils.randomDelay(delayBetweenItems, delayBetweenItems * 2);
+				}
+			}
+
 			try {
 				let responseData: any;
 
