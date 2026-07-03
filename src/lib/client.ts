@@ -387,6 +387,18 @@ export class InstagramClient {
 					'Instagram requires a verification challenge for this login. Open the Instagram app with this account, complete the challenge, then try again.',
 				);
 			}
+			// Distinct from "challenge_required" above: Instagram returns this
+			// plain message (not mapped to a specific error class by
+			// instagram-private-api, hence the raw "POST .../login/ - 400 Bad
+			// Request; checkpoint_required" text otherwise) when it has put the
+			// whole account under a security hold and is refusing automated
+			// logins outright, rather than offering a challenge to solve
+			// through the API.
+			if (message.includes('checkpoint_required')) {
+				throw new Error(
+					'Instagram put this account under a security checkpoint and is refusing this automated login until it is cleared. Log into instagram.com or the Instagram app directly with this account (not through this node), complete whatever verification it shows, then either wait a while and retry, or copy fresh Session ID + CSRF Token cookies from that browser session into the credential as a workaround.',
+				);
+			}
 			if (message.includes('bad_password') || message.includes('incorrect')) {
 				throw new Error('Instagram rejected the username/password combination.');
 			}

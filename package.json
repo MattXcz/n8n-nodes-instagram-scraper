@@ -1,6 +1,6 @@
 {
   "name": "@mattxcz/n8n-nodes-instagram-scraper",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "n8n community node for extracting Instagram post/reel metadata (title, caption, thumbnail, likes, comments, author, date) via a logged-in session, including age-restricted (18+) content",
   "license": "MIT",
   "publishConfig": {

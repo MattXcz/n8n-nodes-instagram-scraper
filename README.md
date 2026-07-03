@@ -82,6 +82,7 @@ A bare `fetch failed` error message means the underlying cause wasn't surfaced �
 
 - `... : redirect count exceeded` or a message about being redirected to `/accounts/login/` or `/challenge/` — the session isn't accepted for web access. Log in through a real browser with the account, then use the Session ID + CSRF Token fields instead of Username/Password for that content.
 - A DNS/connection-level message — check that the n8n host can reach `www.instagram.com` directly, or set **Proxy URL** in the credential.
+- `Instagram authentication failed: ... checkpoint_required` — this one happens at login itself, before any post is even fetched: Instagram has put the whole account under a security hold and is refusing this automated login outright (not something this node can complete on its own). Log into instagram.com or the Instagram app directly with the account, clear whatever it's asking for, then either wait a while and retry Username/Password, or copy fresh Session ID + CSRF Token cookies from that browser session as an immediate workaround. This tends to happen more on accounts with little prior "normal" usage history, so a dedicated automation account that occasionally gets used like a real one (not just hit by this node) is less likely to trip it.
 
 ## License
 
