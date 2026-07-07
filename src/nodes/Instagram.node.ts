@@ -319,14 +319,25 @@ export class Instagram implements INodeType {
 				);
 				returnData.push(...executionData);
 			} catch (error) {
-				const errorMessage = error instanceof Error ? error.message : String(error);
-
 				if (this.continueOnFail()) {
-					const executionErrorData = this.helpers.constructExecutionMetaData(
-						this.helpers.returnJsonArray({ error: errorMessage }),
-						{ itemData: { item: i } },
-					);
-					returnData.push(...executionErrorData);
+					const nodeError = new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });
+					const errorItem: INodeExecutionData = {
+						json: { error: nodeError.message },
+						pairedItem: { item: i },
+					};
+					// This mirrors the pattern n8n's own core nodes use (e.g.
+					// Salesforce.node.ts): only set `.error` when the node's
+					// "On Error" setting is specifically "Continue Using Error
+					// Output" - that's what makes the workflow engine route
+					// this item to the node's dedicated Error output branch
+					// instead of the regular one. `json.error` above still
+					// carries a readable message either way, for workflows
+					// using the older plain "Continue" setting (single
+					// output, no error branch).
+					if (this.getNode().onError === 'continueErrorOutput') {
+						errorItem.error = nodeError;
+					}
+					returnData.push(errorItem);
 					continue;
 				}
 				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });

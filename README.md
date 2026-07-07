@@ -66,6 +66,14 @@ Copy the whole folder (or just `dist/`, `package.json`, `README.md`, `LICENSE`) 
 
 `videoUrl` is the direct link to the highest-quality video file for reels/videos (and for carousels that lead with one), or `null` for photo posts. Both `thumbnail` and `videoUrl` are temporary, signed CDN URLs — download or forward them promptly, they expire.
 
+### Handling failures per item
+
+The node's **Settings -> On Error** dropdown controls what happens when an item fails (e.g. an invalid URL, or Instagram rejecting one specific post):
+
+- **Continue Using Error Output** — failed items are routed to the node's second (red) output, separate from successful ones, so you can wire a dedicated error-handling branch off of it.
+- **Continue (using regular output)** — failed items land in the same single output as successful ones, with an `error` field in `json` describing what went wrong.
+- **Stop Workflow** (default) — the first failure stops the whole execution.
+
 ## Maintenance
 
 Instagram can change its private API at any time without notice; this is an unofficial, reverse-engineered integration, not the official Graph API. If it stops working, check:
