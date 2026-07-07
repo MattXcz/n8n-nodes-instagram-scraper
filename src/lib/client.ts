@@ -618,7 +618,11 @@ export class InstagramClient {
 		// Cookie header is built from the jar (which by now holds sessionid,
 		// csrftoken, and whatever other cookies Instagram issued along the
 		// way) inside fetchInstagramWeb() - only headers that aren't cookies
-		// need to be passed explicitly here.
+		// need to be passed explicitly here. The Sec-Fetch-* / X-ASBD-ID
+		// headers match what a real browser sends for this same XHR call from
+		// an open reel page - without them Instagram can decide the request
+		// doesn't look like an in-page fetch and serve the plain HTML page
+		// shell (still HTTP 200) instead of the JSON payload.
 		const response = await this.fetchInstagramWeb(apiUrl, {
 			'User-Agent':
 				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -626,8 +630,12 @@ export class InstagramClient {
 			'Accept-Language': 'en-US,en;q=0.9',
 			Referer: `https://www.instagram.com/reel/${shortcode}/`,
 			'X-IG-App-ID': '936619743392459',
+			'X-ASBD-ID': '129477',
 			'X-CSRFToken': csrfToken,
 			'X-Requested-With': 'XMLHttpRequest',
+			'Sec-Fetch-Dest': 'empty',
+			'Sec-Fetch-Mode': 'cors',
+			'Sec-Fetch-Site': 'same-origin',
 		});
 
 		const rawBody = await response.text();
@@ -635,6 +643,19 @@ export class InstagramClient {
 		if (!response.ok) {
 			throw new Error(
 				`Instagram returned HTTP ${response.status} for ${apiUrl} (web fallback). Body: ${rawBody.slice(0, 1500)}`,
+			);
+		}
+
+		// A JSON API endpoint replying with an HTML page (still HTTP 200) is
+		// Instagram silently declining the request rather than erroring on it
+		// - functionally the same "session not accepted for this request" as
+		// the redirect-to-login/challenge case fetchInstagramWeb() already
+		// catches, just without an actual redirect this time. Give the same
+		// actionable message instead of dumping a huge HTML body.
+		const contentType = response.headers.get('content-type') ?? '';
+		if (contentType.includes('text/html') || rawBody.trimStart().startsWith('<!DOCTYPE') || rawBody.trimStart().startsWith('<html')) {
+			throw new Error(
+				`Instagram returned its normal web page instead of the expected data for ${apiUrl} (web fallback) - it silently declined the request rather than erroring on it. This tends to happen for the same reason as being redirected to /accounts/login/ or /challenge/: the session isn't fully trusted for this specific request, often after recent checkpoint/rate-limit flags on the account. Log into instagram.com or the Instagram app directly with this account, then either wait a while and retry, or copy fresh Session ID + CSRF Token cookies from that browser session into the credential.`,
 			);
 		}
 
