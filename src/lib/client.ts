@@ -216,6 +216,19 @@ export class InstagramClient {
 					);
 				} else if (errorMessage.includes('429') || errorMessage.includes('too many requests')) {
 					throw new Error('Rate limited by Instagram. Wait a few hours and try again.');
+				} else if (errorMessage.includes('something went wrong')) {
+					// Instagram's generic internal-error response, not a specific
+					// challenge_required/checkpoint_required message. For the
+					// Session ID + CSRF Token path specifically, this is usually
+					// the mismatch this method is inherently prone to: the
+					// sessionid/csrftoken cookies came from a real browser, but
+					// generateDevice(userId) here fabricates a different, never-
+					// before-seen "device" for the signed mobile-API request -
+					// Instagram's fraud detection can reject that combination
+					// outright instead of returning a clean checkpoint message.
+					throw new Error(
+						"Instagram rejected this with its generic \"something went wrong\" error rather than a specific reason. For Session ID + CSRF Token, this usually means the device fingerprint generated for the signed request doesn't match the one Instagram expects for a cookie that came from a real browser - a mismatch this method is inherently prone to. Prefer Username + Password instead (it generates a consistent device from the same login that produces the session). If this keeps happening across different access methods on the same account, Instagram likely has it under broader scrutiny right now - pause automated access entirely for a while (several hours to a day+) before retrying.",
+					);
 				}
 				throw error;
 			}
