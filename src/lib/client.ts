@@ -15,6 +15,16 @@ export class InstagramClient {
 	private client: IgApiClient;
 	private isAuthenticated: boolean = false;
 	private proxyUrl?: string;
+	/**
+	 * True when authentication came from raw Session ID + CSRF Token cookies
+	 * rather than a real login. Those cookies only ever prove a *web*
+	 * session - the mobile private API additionally expects the request to
+	 * be signed by the specific "device" that logged in, which a cookie
+	 * grafted onto a freshly generated device never matches. Once that's
+	 * true, this client sticks to web-based endpoints only instead of
+	 * attempting (and failing) the private API first.
+	 */
+	private isWebOnlySession: boolean = false;
 
 	constructor(credentials?: IInstagramCredentials) {
 		this.client = new IgApiClient();
@@ -173,7 +183,12 @@ export class InstagramClient {
 
 			// Device IDs must be deterministic for a given account, otherwise
 			// Instagram may treat every request as coming from a new device.
+			// Note this device was still just fabricated locally - it has
+			// nothing to do with whatever browser the cookie actually came
+			// from, which is exactly why this client is restricted to
+			// web-based endpoints below rather than the private API.
 			this.client.state.generateDevice(userId);
+			this.isWebOnlySession = true;
 
 			const cookieUrl = 'https://i.instagram.com';
 			await this.client.state.cookieJar.setCookie(
@@ -190,8 +205,13 @@ export class InstagramClient {
 			);
 
 			try {
-				// Verify the session actually works before reporting success.
-				await this.client.user.info(userId);
+				// Verify via a web endpoint, not this.client.user.info() (the
+				// mobile private API): that call signs the request using the
+				// fabricated device above, which Instagram's fraud detection
+				// can reject outright for a cookie it knows came from a real
+				// browser - the generic, unhelpful "something went wrong"
+				// error this exact check used to produce.
+				await this.verifyWebSession(userId);
 				this.isAuthenticated = true;
 			} catch (verifyError) {
 				throw new Error(
@@ -239,6 +259,20 @@ export class InstagramClient {
 	private ensureAuthenticated(): void {
 		if (!this.isAuthenticated) {
 			throw new Error('Client is not authenticated. Please call authenticate() first.');
+		}
+	}
+
+	/**
+	 * Guards operations that only exist through the mobile private API, with
+	 * no web-based equivalent implemented (unlike Post -> Get Info by URL,
+	 * which has getPostByUrlWeb()). A session built from raw Session ID +
+	 * CSRF Token cookies can't use these reliably - see isWebOnlySession.
+	 */
+	private ensurePrivateApiAvailable(operationName: string): void {
+		if (this.isWebOnlySession) {
+			throw new Error(
+				`"${operationName}" only works through Instagram's mobile private API, which isn't compatible with Session ID + CSRF Token credentials (those cookies only prove a web session, not a matching private-API device - see the "Post -> Get Info by URL" web fallback for why). Use Username + Password for this operation instead.`,
+			);
 		}
 	}
 
@@ -343,6 +377,59 @@ export class InstagramClient {
 	}
 
 	/**
+	 * Confirms raw Session ID + CSRF Token cookies actually work, using the
+	 * same web-endpoint pattern as getPostByUrlWeb() rather than the mobile
+	 * private API - a cookie copied out of a browser only ever proves a web
+	 * session, so this is the only kind of request it can legitimately pass.
+	 */
+	private async verifyWebSession(userId: string): Promise<void> {
+		const csrfToken = await this.getRawCookieValue('csrftoken');
+		if (!csrfToken) {
+			throw new Error('No csrftoken cookie available to verify the session.');
+		}
+
+		const verifyUrl = `https://www.instagram.com/api/v1/users/${userId}/info/`;
+		const response = await this.fetchInstagramWeb(verifyUrl, {
+			'User-Agent':
+				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+			Accept: '*/*',
+			'Accept-Language': 'en-US,en;q=0.9',
+			Referer: 'https://www.instagram.com/',
+			'X-IG-App-ID': '936619743392459',
+			'X-ASBD-ID': '129477',
+			'X-CSRFToken': csrfToken,
+			'X-Requested-With': 'XMLHttpRequest',
+			'Sec-Fetch-Dest': 'empty',
+			'Sec-Fetch-Mode': 'cors',
+			'Sec-Fetch-Site': 'same-origin',
+		});
+
+		const rawBody = await response.text();
+
+		if (!response.ok) {
+			throw new Error(`Instagram returned HTTP ${response.status} for ${verifyUrl} (web session check). Body: ${rawBody.slice(0, 1000)}`);
+		}
+
+		const contentType = response.headers.get('content-type') ?? '';
+		if (contentType.includes('text/html') || rawBody.trimStart().startsWith('<!DOCTYPE') || rawBody.trimStart().startsWith('<html')) {
+			throw new Error(
+				`Instagram returned its normal web page instead of confirming the session for ${verifyUrl} - the cookies were not accepted for this web request.`,
+			);
+		}
+
+		let parsed: any;
+		try {
+			parsed = JSON.parse(rawBody);
+		} catch {
+			throw new Error(`Web session check response was not valid JSON for ${verifyUrl}. Body: ${rawBody.slice(0, 1000)}`);
+		}
+
+		if (parsed?.status === 'fail' || (typeof parsed?.message === 'string' && !parsed?.user)) {
+			throw new Error(parsed.message ?? `Instagram rejected the web session check for ${verifyUrl}.`);
+		}
+	}
+
+	/**
 	 * Real login with username + password, using the same pre/post-login flow
 	 * simulation as the official Instagram app. Returns a serialized session
 	 * (`sessionData`) that the node caches in the workflow's static data, so
@@ -421,6 +508,7 @@ export class InstagramClient {
 
 	async getUserInfo(username: string): Promise<IInstagramUser> {
 		this.ensureAuthenticated();
+		this.ensurePrivateApiAvailable('User -> Get Profile Info');
 		try {
 			const user = await this.client.user.searchExact(username);
 			const userInfo = await this.client.user.info(user.pk);
@@ -443,6 +531,7 @@ export class InstagramClient {
 
 	async getTimelineFeed(maxId?: string): Promise<IInstagramTimelineFeed> {
 		this.ensureAuthenticated();
+		this.ensurePrivateApiAvailable('Feed -> Get Timeline Feed');
 		try {
 			const feed = this.client.feed.timeline();
 			const response = await feed.request();
@@ -476,6 +565,7 @@ export class InstagramClient {
 	 */
 	async getMediaInfo(mediaId: string): Promise<IInstagramMediaInfo> {
 		this.ensureAuthenticated();
+		this.ensurePrivateApiAvailable('Media -> Get Media Info');
 		try {
 			const media = await this.client.media.info(mediaId);
 			const item = media.items[0] as any;
@@ -521,6 +611,14 @@ export class InstagramClient {
 	 */
 	async getPostByUrl(url: string): Promise<IInstagramPostSummary> {
 		this.ensureAuthenticated();
+
+		// A cookie-only session can't sign private-API requests reliably (see
+		// isWebOnlySession) - go straight to the web path instead of trying
+		// the private API first and waiting for it to fail.
+		if (this.isWebOnlySession) {
+			return await this.getPostByUrlWeb(url);
+		}
+
 		try {
 			return await this.getPostByUrlPrivateApi(url);
 		} catch (error) {
