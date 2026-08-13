@@ -1,5 +1,7 @@
 # n8n-nodes-instagram-scraper
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-%E2%98%95-FFDD00?style=flat-square)](https://buymeacoffee.com/mattxcz)
+
 n8n community node that extracts Instagram post/reel metadata (title, caption, thumbnail, likes, comments, author, date, media type) using an authenticated session. Because it authenticates as a real logged-in account, it also works for age-restricted (18+) content that Instagram hides from anonymous/bot requests.
 
 This is a fork of [n8n-nodes-instagram-private-api-wrapped](https://github.com/tiagohintz/n8n-nodes-instagram-private-api-wrapped) by tiagohintz (MIT licensed), trimmed down and extended specifically for metadata scraping:
@@ -94,6 +96,12 @@ A bare `fetch failed` error message means the underlying cause wasn't surfaced �
 - `Instagram returned its normal web page instead of the expected data ...` — Instagram answered the web fallback's data request with HTTP 200 but the plain website HTML instead of JSON, which is it silently declining the request rather than erroring on it (same underlying cause as the redirect-to-login/challenge case above, just without an actual redirect this time). Same fix: log in via a real browser/app, wait a bit, and/or refresh Session ID + CSRF Token.
 - `... "something went wrong" ...` (Instagram's generic internal-error message, not a specific challenge/checkpoint one) — this used to happen because Session ID + CSRF Token verification called the mobile private API, which signs requests with a device that never matches a browser-issued cookie. As of this version that verification (and **Post -> Get Info by URL**) uses web-based endpoints instead for this credential type, so this specific error shouldn't recur for that operation. If you still see it, or see it from **Media/User/Feed** operations (which only exist through the private API and need Username + Password), that's Instagram's fraud detection rejecting the request outright rather than a code issue.
 If you're cycling through several of the errors above on the same account within a short time regardless of credential method, that's a sign the account itself is temporarily flagged rather than a specific bug - repeated automated attempts while flagged tend to prolong it. Log in once through a real, non-incognito browser/app you'd normally use to clear it, then stop the workflow and wait several hours to a day+ before retrying, rather than switching credential methods.
+
+## Support
+
+Instagram changes its private API without notice, so keeping this node working is ongoing maintenance rather than a one-off. If it saves you time, you can support that here: [buymeacoffee.com/mattxcz](https://buymeacoffee.com/mattxcz) ☕
+
+Bug reports and PRs are just as welcome — [open an issue](https://github.com/MattXcz/n8n-nodes-instagram-scraper/issues).
 
 ## License
 

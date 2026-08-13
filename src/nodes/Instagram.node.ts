@@ -209,6 +209,14 @@ export class Instagram implements INodeType {
 					},
 				],
 			},
+
+			{
+				displayName:
+					'Instagram keeps changing its private API, so this node needs regular upkeep to keep working. If it saves you time, you can support that at <a href="https://buymeacoffee.com/mattxcz" target="_blank">buymeacoffee.com/mattxcz</a>.',
+				name: 'supportNotice',
+				type: 'notice',
+				default: '',
+			},
 		],
 	};
 

@@ -18,6 +18,10 @@
   "bugs": {
     "url": "https://github.com/MattXcz/n8n-nodes-instagram-scraper/issues"
   },
+  "funding": {
+    "type": "buymeacoffee",
+    "url": "https://buymeacoffee.com/mattxcz"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "n8n": {
