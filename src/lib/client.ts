@@ -234,8 +234,8 @@ export class InstagramClient {
 					throw new Error(
 						'Instagram account requires verification. Complete it in the app, wait 24-48h, then copy fresh cookie values.',
 					);
-				} else if (errorMessage.includes('429') || errorMessage.includes('too many requests')) {
-					throw new Error('Rate limited by Instagram. Wait a few hours and try again.');
+				} else if (Utils.isRateLimitError(error)) {
+					throw new Error(`Rate limited by Instagram. Wait a few hours and try again. (Original error: ${error.message.slice(0, 500)})`);
 				} else if (errorMessage.includes('something went wrong')) {
 					// Instagram's generic internal-error response, not a specific
 					// challenge_required/checkpoint_required message. For the
@@ -498,6 +498,9 @@ export class InstagramClient {
 				throw new Error(
 					'Instagram put this account under a security checkpoint and is refusing this automated login until it is cleared. Log into instagram.com or the Instagram app directly with this account (not through this node), complete whatever verification it shows, then either wait a while and retry, or copy fresh Session ID + CSRF Token cookies from that browser session into the credential as a workaround.',
 				);
+			}
+			if (Utils.isRateLimitError(error)) {
+				throw new Error(`Rate limited by Instagram during login. Wait a few hours and try again. (Original error: ${Utils.formatError(error).slice(0, 500)})`);
 			}
 			if (message.includes('bad_password') || message.includes('incorrect')) {
 				throw new Error('Instagram rejected the username/password combination.');

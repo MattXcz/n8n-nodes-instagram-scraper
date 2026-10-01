@@ -60,10 +60,17 @@ export class Utils {
 	 */
 	static isRateLimitError(error: any): boolean {
 		const errorMsg = this.formatError(error).toLowerCase();
+		// Match 429 only as an HTTP status (e.g. "HTTP 429", "- 429 Too Many
+		// Requests"), never as a bare substring: error messages here embed
+		// numeric user IDs in URLs and raw response bodies, where "429" shows
+		// up by coincidence and was misreported as a rate limit.
 		return (
 			errorMsg.includes('rate limit') ||
 			errorMsg.includes('too many requests') ||
-			errorMsg.includes('429')
+			errorMsg.includes('please wait a few minutes') ||
+			/\bhttp 429\b/.test(errorMsg) ||
+			/(?:^|[\s-])429 too many/.test(errorMsg) ||
+			/status(?: code)?[:\s]+429\b/.test(errorMsg)
 		);
 	}
 

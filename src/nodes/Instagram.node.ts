@@ -271,13 +271,33 @@ export class Instagram implements INodeType {
 				);
 			}
 		} catch (error) {
-			throw new NodeOperationError(
+			const authError = new NodeOperationError(
 				this.getNode(),
 				`Instagram authentication failed: ${
 					error instanceof Error ? error.message : 'Unknown error'
 				}`,
 				{ itemIndex: 0 },
 			);
+			// Authentication happens once, before the per-item loop, so its
+			// failure must honor "On Error" too - otherwise it bypasses the
+			// Error output branch entirely. Every input item failed for the
+			// same reason, so route each one as an error item.
+			if (this.continueOnFail()) {
+				const toErrorOutput = this.getNode().onError === 'continueErrorOutput';
+				return [
+					items.map((_, i) => {
+						const errorItem: INodeExecutionData = {
+							json: { error: authError.message },
+							pairedItem: { item: i },
+						};
+						if (toErrorOutput) {
+							errorItem.error = authError;
+						}
+						return errorItem;
+					}),
+				];
+			}
+			throw authError;
 		}
 
 		for (let i = 0; i < items.length; i++) {
