@@ -26,8 +26,34 @@ export class InstagramClient {
 	 */
 	private isWebOnlySession: boolean = false;
 
+	/**
+	 * instagram-private-api ships app version 222 (2022). Instagram now
+	 * rejects logins from that version with "Your version of Instagram is out
+	 * of date" (error_type needs_upgrade). Present a current app profile
+	 * instead - same one instagrapi 3.0.14 uses.
+	 */
+	private static readonly APP_PROFILE = {
+		APP_VERSION: '448.0.0.0.20',
+		APP_VERSION_CODE: '1065560286',
+		BLOKS_VERSION_ID: '0bc46a03e177bfc9bc8d611918815acf248fa9c77754d807d6a5951dc9ce9432',
+	};
+	private static readonly DEVICE_STRING = '34/14; 480dpi; 1344x2992; Google/google; Pixel 8 Pro; husky; husky';
+	private static readonly BROWSER_UA =
+		'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36';
+	private static readonly WEB_APP_ID = '936619743392459';
+
+	/** Must also run after deserialize(), which restores the old constants saved in a session. */
+	private applyAppProfile(): void {
+		const state: any = this.client.state;
+		state.constants = { ...state.constants, ...InstagramClient.APP_PROFILE };
+		if (state.deviceString) {
+			state.deviceString = InstagramClient.DEVICE_STRING;
+		}
+	}
+
 	constructor(credentials?: IInstagramCredentials) {
 		this.client = new IgApiClient();
+		this.applyAppProfile();
 		if (credentials?.proxyUrl) {
 			this.client.state.proxyUrl = credentials.proxyUrl;
 			this.proxyUrl = credentials.proxyUrl;
@@ -160,6 +186,10 @@ export class InstagramClient {
 			if (credentials.sessionData && credentials.sessionData.trim()) {
 				await this.loadSession(credentials.sessionData);
 				try {
+					if (this.isWebOnlySession) {
+						await this.verifyWebSession(this.client.state.cookieUserId);
+						return;
+					}
 					await this.client.user.info(this.client.state.cookieUserId);
 				} catch (verifyError) {
 					this.isAuthenticated = false;
@@ -406,6 +436,14 @@ export class InstagramClient {
 
 		const rawBody = await response.text();
 
+		// This user-info endpoint is throttled far more aggressively for
+		// non-browser clients than the post/reel endpoints we actually need,
+		// so a 429 here says nothing about whether the cookies work. Treat it
+		// as inconclusive and let the real request decide.
+		if (response.status === 429) {
+			return;
+		}
+
 		if (!response.ok) {
 			throw new Error(`Instagram returned HTTP ${response.status} for ${verifyUrl} (web session check). Body: ${rawBody.slice(0, 1000)}`);
 		}
@@ -443,6 +481,7 @@ export class InstagramClient {
 			// Deterministic per-username device, so re-running this later
 			// (e.g. after a session expires) reuses the same fingerprint.
 			this.client.state.generateDevice(username);
+			this.applyAppProfile();
 
 			// preLoginFlow is just realism (mimics the app warming up before
 			// login) - if it fails, still attempt the actual login below.
@@ -477,6 +516,12 @@ export class InstagramClient {
 			this.isAuthenticated = false;
 			const message = Utils.formatError(error).toLowerCase();
 
+			// Instagram still refuses this app version for the legacy login
+			// endpoint - log in like a browser instead (web session).
+			if (message.includes('out of date') || message.includes('needs_upgrade')) {
+				return await this.loginWithWeb(username, password);
+			}
+
 			if (message.includes('two_factor') || message.includes('two-factor') || message.includes('checkpoint_challenge_required')) {
 				throw new Error(
 					'This account needs an extra verification step (2FA or a challenge) that this one-time login cannot complete automatically. Log in once through the Instagram app/browser to clear it, then either retry this operation or use the Session ID + CSRF Token fields instead.',
@@ -507,6 +552,115 @@ export class InstagramClient {
 			}
 			throw new Error(`Login failed: ${Utils.formatError(error)}`);
 		}
+	}
+
+	/**
+	 * Browser-style login through www.instagram.com, used when Instagram
+	 * rejects the mobile app login. Produces a web-only session (sessionid +
+	 * csrftoken cookies), which supports Post -> Get Info by URL.
+	 */
+	private async loginWithWeb(username: string, password: string): Promise<IInstagramLoginResult> {
+		const baseHeaders = {
+			'User-Agent': InstagramClient.BROWSER_UA,
+			'Accept-Language': 'en-US,en;q=0.9',
+		};
+
+		// 1) Load the login page to get csrftoken / mid / ig_did cookies.
+		const page = await this.fetchInstagramWeb('https://www.instagram.com/accounts/login/', {
+			...baseHeaders,
+			Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+		});
+		const pageHtml = await page.text();
+		if (page.status === 429) {
+			throw new Error('Rate limited by Instagram (HTTP 429) while opening the web login page. Wait a few hours and try again.');
+		}
+		let csrfToken = await this.getRawCookieValue('csrftoken');
+		if (!csrfToken) {
+			const match = pageHtml.match(/"csrf_token":"([^"]+)"/);
+			csrfToken = match?.[1];
+		}
+		if (!csrfToken) {
+			throw new Error('Web login failed: Instagram did not provide a csrftoken on the login page.');
+		}
+
+		// 2) Submit credentials.
+		const loginUrl = 'https://www.instagram.com/api/v1/web/accounts/login/ajax/';
+		const body = new URLSearchParams({
+			username,
+			enc_password: `#PWD_INSTAGRAM_BROWSER:0:${Math.floor(Date.now() / 1000)}:${password}`,
+			queryParams: '{}',
+			optIntoOneTap: 'false',
+			trustedDeviceRecords: '{}',
+		}).toString();
+
+		await Utils.randomDelay(1000, 2500);
+
+		const response = await this.fetchWithProxy(loginUrl, {
+			method: 'POST',
+			redirect: 'manual',
+			headers: {
+				...baseHeaders,
+				Accept: '*/*',
+				'Content-Type': 'application/x-www-form-urlencoded',
+				Origin: 'https://www.instagram.com',
+				Referer: 'https://www.instagram.com/accounts/login/',
+				'X-CSRFToken': csrfToken,
+				'X-IG-App-ID': InstagramClient.WEB_APP_ID,
+				'X-Requested-With': 'XMLHttpRequest',
+				'X-Instagram-AJAX': '1',
+				Cookie: this.client.state.cookieJar.getCookieString(loginUrl),
+			},
+			body,
+		});
+
+		const setCookieHeaders: string[] =
+			typeof (response.headers as any).getSetCookie === 'function' ? (response.headers as any).getSetCookie() : [];
+		for (const header of setCookieHeaders) {
+			try {
+				this.client.state.cookieJar.setCookie(header, loginUrl);
+			} catch {
+				// ignore rejected cookie
+			}
+		}
+
+		const rawBody = await response.text();
+		if (response.status === 429) {
+			throw new Error(`Rate limited by Instagram (HTTP 429) during web login. Wait a few hours and try again.`);
+		}
+		let data: any;
+		try {
+			data = JSON.parse(rawBody);
+		} catch {
+			throw new Error(`Web login failed: HTTP ${response.status}, unexpected response: ${rawBody.slice(0, 300)}`);
+		}
+
+		if (data.two_factor_required) {
+			throw new Error('This account has two-factor authentication enabled, which the automatic login cannot complete. Turn off 2FA for this (automation) account, or use Session ID + CSRF Token from a browser.');
+		}
+		if (data.checkpoint_url || data.message === 'checkpoint_required') {
+			throw new Error('Instagram requires a security check for this login. Log in at instagram.com in a normal browser with this account, confirm it was you, then try again.');
+		}
+		if (data.authenticated !== true) {
+			if (data.user === false) {
+				throw new Error('Instagram does not recognise this username.');
+			}
+			if (data.authenticated === false) {
+				throw new Error('Instagram rejected the username/password combination.');
+			}
+			throw new Error(`Web login failed: HTTP ${response.status}: ${rawBody.slice(0, 300)}`);
+		}
+
+		const userId = String(data.userId ?? (await this.getRawCookieValue('ds_user_id')) ?? '');
+		if (!(await this.getRawCookieValue('sessionid'))) {
+			throw new Error('Web login reported success but Instagram did not set a sessionid cookie.');
+		}
+
+		this.isWebOnlySession = true;
+		this.isAuthenticated = true;
+		const serialized: any = await this.client.state.serialize();
+		serialized.__webOnly = true;
+
+		return { sessionData: JSON.stringify(serialized), userId, username };
 	}
 
 	async getUserInfo(username: string): Promise<IInstagramUser> {
@@ -847,7 +1001,11 @@ export class InstagramClient {
 	async loadSession(sessionData: string): Promise<void> {
 		try {
 			const parsed = typeof sessionData === 'string' ? JSON.parse(sessionData) : sessionData;
+			const webOnly = parsed && parsed.__webOnly === true;
+			if (parsed) delete parsed.__webOnly;
 			await this.client.state.deserialize(parsed);
+			this.applyAppProfile();
+			this.isWebOnlySession = webOnly;
 			this.isAuthenticated = true;
 		} catch (error) {
 			this.isAuthenticated = false;
