@@ -17,8 +17,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing (OIDC) needs npm >= 11.5.1
+      - run: npm install -g npm@latest
 
       - run: npm ci
       - run: npm run build
@@ -30,6 +33,5 @@ jobs:
             echo "Tag $GITHUB_REF_NAME != package.json $PKG"; exit 1
           fi
 
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Auth via npm Trusted Publisher (OIDC), provenance is generated automatically
+      - run: npm publish --access public
