@@ -60,14 +60,14 @@ export class Instagram implements INodeType {
 					{
 						name: 'Get Info by URL',
 						value: 'getInfoByUrl',
-						description: 'Get title, caption, thumbnail and stats for a post/reel URL',
+						description: 'Get title, caption, thumbnail and stats for a post, reel or story URL',
 						action: 'Get info for a post or reel by URL',
 					},
 				],
 				default: 'getInfoByUrl',
 			},
 			{
-				displayName: 'Post / Reel URL',
+				displayName: 'Post / Reel / Story URL',
 				name: 'url',
 				type: 'string',
 				displayOptions: {
@@ -78,7 +78,7 @@ export class Instagram implements INodeType {
 				},
 				default: '',
 				placeholder: 'https://www.instagram.com/reel/DLwUswhN6Ax/',
-				description: 'Full URL of the Instagram post, reel or IGTV video',
+				description: 'Full URL of the Instagram post, reel, IGTV video or story (instagram.com/stories/USERNAME/ID/, also highlights). Stories only work while they are live (24h) or saved in a highlight.',
 				required: true,
 			},
 

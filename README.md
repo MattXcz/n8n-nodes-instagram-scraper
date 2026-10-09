@@ -111,7 +111,9 @@ Error items (with *On Error → Continue*) have the same shape in both nodes: `{
 ffmpeg -i video.mp4 -i audio.mp4 -map 0:v -map 1:a -c copy out.mp4
 ```
 
-Instagram-specific extras: `shortcode`, `mediaId`.
+Instagram-specific extras: `shortcode` (empty for stories), `mediaId`, `isStory`.
+
+**Stories:** *Post → Get Info by URL* also accepts story URLs (`https://www.instagram.com/stories/USERNAME/STORY_ID/`) and highlights (`/stories/highlights/ID/`, optionally `?story_media_id=…`). A story only works while it is live (24 h) or saved in a highlight; for private accounts the logged-in account must follow them. `title`/`description` are usually `null` (stories have no caption), likes/comments are not public.
 
 Notes:
 - `viewCount` = reel plays; `likeCount` is `null` when the author hid like counts; `shareCount` is usually `null` (Instagram rarely exposes it).

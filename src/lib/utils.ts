@@ -92,6 +92,29 @@ export class Utils {
 	}
 
 	/**
+	 * Parses an Instagram story URL. Supports:
+	 *   https://www.instagram.com/stories/USERNAME/STORY_PK/
+	 *   https://www.instagram.com/stories/highlights/HIGHLIGHT_ID/            (first item)
+	 *   https://www.instagram.com/stories/highlights/HIGHLIGHT_ID/?story_media_id=PK_USERID
+	 * Returns null for anything that isn't a story URL.
+	 */
+	static extractStoryRef(
+		url: string,
+	): { username: string | null; highlightId: string | null; mediaPk: string | null } | null {
+		if (!url || typeof url !== 'string') return null;
+		const hl = url.match(/instagram\.com\/stories\/highlights\/(\d+)/i);
+		if (hl) {
+			const sm = url.match(/[?&]story_media_id=(\d+)/i);
+			return { username: null, highlightId: hl[1], mediaPk: sm ? sm[1] : null };
+		}
+		const st = url.match(/instagram\.com\/stories\/([A-Za-z0-9._]+)(?:\/(\d+))?/i);
+		if (st) {
+			return { username: st[1], highlightId: null, mediaPk: st[2] ?? null };
+		}
+		return null;
+	}
+
+	/**
 	 * Converts an Instagram shortcode (e.g. "DLwUswhN6Ax") into the numeric
 	 * media PK that the private API's media.info() call expects.
 	 *
@@ -314,11 +337,11 @@ export class Utils {
 	 */
 	static errorCode(error: any): string | null {
 		const m = this.formatError(error).toLowerCase();
-		if (m.includes('could not find a post/reel shortcode')) return 'INVALID_URL';
+		if (m.includes('could not find a post/reel shortcode') || m.includes('not a valid instagram story url')) return 'INVALID_URL';
 		if (this.isRateLimitError(error)) return 'RATE_LIMITED';
 		if (/checkpoint|challenge_required|\/challenge\//.test(m)) return 'VERIFICATION_REQUIRED';
 		if (/login_required|\/accounts\/login|authentication failed|session (?:is )?(?:invalid|expired)|declined the request/.test(m)) return 'SESSION_EXPIRED';
-		if (/media not found|not available|no media item|http 404|does not exist/.test(m)) return 'CONTENT_UNAVAILABLE';
+		if (/media not found|not available|no longer available|no media item|http 404|does not exist/.test(m)) return 'CONTENT_UNAVAILABLE';
 		if (/fetch failed|enotfound|econnrefused|econnreset|etimedout|socket|tls/.test(m)) return 'NETWORK_ERROR';
 		if (/\bhttp \d{3}\b/.test(m)) return 'HTTP_ERROR';
 		return null;

@@ -207,8 +207,11 @@ export interface IInstagramPostSummary {
 	fetchedAt: string;
 
 	// Instagram-specific
+	/** Empty string for stories that have no shortcode. */
 	shortcode: string;
 	mediaId: string;
+	/** true when the input was a story (or highlight) URL. */
+	isStory: boolean;
 }
 
 export interface IInstagramComment {

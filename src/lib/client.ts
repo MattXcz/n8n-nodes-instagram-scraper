@@ -807,6 +807,10 @@ export class InstagramClient {
 	async getPostByUrl(url: string): Promise<IInstagramPostSummary> {
 		this.ensureAuthenticated();
 
+		if (Utils.extractStoryRef(url)) {
+			return await this.getStoryByUrl(url);
+		}
+
 		// A cookie-only session can't sign private-API requests reliably (see
 		// isWebOnlySession) - go straight to the web path instead of trying
 		// the private API first and waiting for it to fail.
@@ -865,6 +869,26 @@ export class InstagramClient {
 			);
 		}
 
+		const mediaId = Utils.shortcodeToMediaId(shortcode);
+		const apiUrl = `https://www.instagram.com/api/v1/media/${mediaId}/info/`;
+		const { parsed, rawBody } = await this.webApiGetJson(apiUrl, `https://www.instagram.com/reel/${shortcode}/`);
+
+		const item = parsed?.items?.[0];
+		if (!item) {
+			throw new Error(
+				`Web fallback response had no media item for ${apiUrl}. Body: ${rawBody.slice(0, 1500)}`,
+			);
+		}
+
+		return await this.summarizeItem(item, url, shortcode, mediaId);
+	}
+
+	/**
+	 * Authenticated GET of a www.instagram.com/api/v1/... JSON endpoint, the
+	 * same way the web app's own XHRs do it. Shared by the post and story web
+	 * fallbacks.
+	 */
+	private async webApiGetJson(apiUrl: string, referer: string): Promise<{ parsed: any; rawBody: string }> {
 		const sessionId = await this.getSessionIdForWebRequest();
 		if (!sessionId) {
 			throw new Error(
@@ -877,9 +901,6 @@ export class InstagramClient {
 				'No session cookies available to make an authenticated web request (csrftoken: missing). Try logging in again.',
 			);
 		}
-
-		const mediaId = Utils.shortcodeToMediaId(shortcode);
-		const apiUrl = `https://www.instagram.com/api/v1/media/${mediaId}/info/`;
 
 		// Cookie header is built from the jar (which by now holds sessionid,
 		// csrftoken, and whatever other cookies Instagram issued along the
@@ -894,7 +915,7 @@ export class InstagramClient {
 				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
 			Accept: '*/*',
 			'Accept-Language': 'en-US,en;q=0.9',
-			Referer: `https://www.instagram.com/reel/${shortcode}/`,
+			Referer: referer,
 			'X-IG-App-ID': '936619743392459',
 			'X-ASBD-ID': '129477',
 			'X-CSRFToken': csrfToken,
@@ -933,15 +954,124 @@ export class InstagramClient {
 				`Web fallback response was not valid JSON for ${apiUrl}. Body: ${rawBody.slice(0, 1500)}`,
 			);
 		}
+		return { parsed, rawBody };
+	}
 
-		const item = parsed?.items?.[0];
-		if (!item) {
+	// ------------------------------------------------------------------ stories
+
+	/**
+	 * Story / highlight URL -> same normalized summary as a post.
+	 *
+	 * 1) Try media info for the story PK directly (works for live stories
+	 *    and saved highlight items).
+	 * 2) Otherwise load the whole reel (the user's current stories, or the
+	 *    highlight) via feed/reels_media and pick the item by PK.
+	 *
+	 * Private API first, web endpoints on checkpoint_required or for
+	 * web-only sessions - same strategy as getPostByUrl().
+	 */
+	private async getStoryByUrl(url: string): Promise<IInstagramPostSummary> {
+		const ref = Utils.extractStoryRef(url);
+		if (!ref || (!ref.username && !ref.highlightId)) {
 			throw new Error(
-				`Web fallback response had no media item for ${apiUrl}. Body: ${rawBody.slice(0, 1500)}`,
+				`"${url}" is not a valid Instagram story URL. Expected https://www.instagram.com/stories/USERNAME/STORY_ID/`,
 			);
 		}
 
-		return await this.summarizeItem(item, url, shortcode, mediaId);
+		let item: any;
+		if (this.isWebOnlySession) {
+			item = await this.findStoryItemWeb(ref);
+		} else {
+			try {
+				item = await this.findStoryItemPrivateApi(ref);
+			} catch (error) {
+				if (!Utils.formatError(error).toLowerCase().includes('checkpoint_required')) throw error;
+				item = await this.findStoryItemWeb(ref);
+			}
+		}
+
+		const mediaId = String(item.pk ?? String(item.id ?? '').split('_')[0]);
+		const username: string | null = item.user?.username ?? ref.username;
+		const canonical = ref.highlightId
+			? `https://www.instagram.com/stories/highlights/${ref.highlightId}/`
+			: `https://www.instagram.com/stories/${username}/${mediaId}/`;
+		return await this.summarizeItem(item, url, item.code ?? '', mediaId, { canonicalUrl: canonical, isStory: true });
+	}
+
+	private static storyNotFound(ref: { username: string | null; highlightId: string | null; mediaPk: string | null }): Error {
+		const what = ref.highlightId ? `highlight ${ref.highlightId}` : `@${ref.username}`;
+		return new Error(
+			`Story${ref.mediaPk ? ` ${ref.mediaPk}` : ''} of ${what} was not found / is no longer available. Stories expire after 24 hours unless saved to a highlight; private accounts need the logged-in account to follow them.`,
+		);
+	}
+
+	private static pickStoryItem(items: any[], mediaPk: string | null): any | null {
+		if (!Array.isArray(items) || items.length === 0) return null;
+		if (!mediaPk) return items[0];
+		// `id` is the string "<pk>_<userId>" - safe even when `pk` lost precision as a JS number.
+		return (
+			items.find((it) => String(it?.id ?? '').split('_')[0] === mediaPk || String(it?.pk ?? '') === mediaPk) ?? null
+		);
+	}
+
+	private static isFatalForFallback(error: unknown): boolean {
+		const m = Utils.formatError(error).toLowerCase();
+		return m.includes('checkpoint_required') || m.includes('challenge_required') || m.includes('login_required') || Utils.isRateLimitError(error);
+	}
+
+	private async findStoryItemPrivateApi(ref: { username: string | null; highlightId: string | null; mediaPk: string | null }): Promise<any> {
+		if (ref.mediaPk) {
+			try {
+				const item = await this.getRawMediaItem(ref.mediaPk);
+				if (item) return item;
+			} catch (error) {
+				if (InstagramClient.isFatalForFallback(error)) throw error;
+				// e.g. "Media not found" - try the reel feed below
+			}
+		}
+
+		const reelId = ref.highlightId ? `highlight:${ref.highlightId}` : String(await this.client.user.getIdByUsername(ref.username as string));
+		const items = await this.client.feed.reelsMedia({ userIds: [reelId] }).items();
+		const item = InstagramClient.pickStoryItem(items as any[], ref.mediaPk);
+		if (!item) throw InstagramClient.storyNotFound(ref);
+		return item;
+	}
+
+	private async findStoryItemWeb(ref: { username: string | null; highlightId: string | null; mediaPk: string | null }): Promise<any> {
+		const referer = ref.highlightId
+			? `https://www.instagram.com/stories/highlights/${ref.highlightId}/`
+			: `https://www.instagram.com/stories/${ref.username}/${ref.mediaPk ?? ''}`;
+
+		if (ref.mediaPk) {
+			try {
+				const { parsed } = await this.webApiGetJson(`https://www.instagram.com/api/v1/media/${ref.mediaPk}/info/`, referer);
+				if (parsed?.items?.[0]) return parsed.items[0];
+			} catch (error) {
+				if (InstagramClient.isFatalForFallback(error)) throw error;
+			}
+		}
+
+		let reelId: string;
+		if (ref.highlightId) {
+			reelId = `highlight:${ref.highlightId}`;
+		} else {
+			const { parsed, rawBody } = await this.webApiGetJson(
+				`https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(ref.username as string)}`,
+				`https://www.instagram.com/${ref.username}/`,
+			);
+			const id = parsed?.data?.user?.id;
+			if (!id) throw new Error(`Could not resolve user ID for @${ref.username}. Body: ${rawBody.slice(0, 500)}`);
+			reelId = String(id);
+		}
+
+		const { parsed } = await this.webApiGetJson(
+			`https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${encodeURIComponent(reelId)}`,
+			referer,
+		);
+		const reel = parsed?.reels?.[reelId] ?? (Array.isArray(parsed?.reels_media) ? parsed.reels_media[0] : null);
+		const item = InstagramClient.pickStoryItem(reel?.items ?? [], ref.mediaPk);
+		if (!item) throw InstagramClient.storyNotFound(ref);
+		return item;
 	}
 
 	/**
@@ -949,7 +1079,13 @@ export class InstagramClient {
 	 * from the web /api/v1/media/<id>/info/ endpoint) into the normalized
 	 * summary. Field names/meaning match the Facebook scraper node.
 	 */
-	private async summarizeItem(item: any, url: string, shortcode: string, mediaId: string): Promise<IInstagramPostSummary> {
+	private async summarizeItem(
+		item: any,
+		url: string,
+		shortcode: string,
+		mediaId: string,
+		opts: { canonicalUrl?: string; isStory?: boolean } = {},
+	): Promise<IInstagramPostSummary> {
 		const mediaTypeMap: Record<number, IInstagramPostSummary['mediaType']> = {
 			1: 'photo',
 			2: 'video',
@@ -1000,7 +1136,7 @@ export class InstagramClient {
 		return {
 			platform: 'instagram',
 			id: mediaId,
-			url: `https://www.instagram.com/${item.product_type === 'clips' ? 'reel' : 'p'}/${shortcode}/`,
+			url: opts.canonicalUrl ?? `https://www.instagram.com/${item.product_type === 'clips' ? 'reel' : 'p'}/${shortcode}/`,
 			inputUrl: url,
 			title: Utils.titleFromCaption(caption),
 			description: caption,
@@ -1039,6 +1175,7 @@ export class InstagramClient {
 
 			shortcode,
 			mediaId,
+			isStory: opts.isStory === true,
 		};
 	}
 
