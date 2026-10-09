@@ -1,4 +1,4 @@
-import { RetryOptions, IInstagramPostSummary, IInstagramRawComment, IInstagramTopComment } from './types';
+import { RetryOptions, IInstagramRawComment, IInstagramTopComment } from './types';
 
 /**
  * Utility functions for Instagram n8n integration
@@ -153,6 +153,86 @@ export class Utils {
 	}
 
 	/**
+	 * Determines whether an MP4 file contains an audio track by walking its
+	 * top-level boxes to `moov` and looking for a `hdlr` box with handler
+	 * type `soun`. Only the needed byte ranges are fetched via `readRange`
+	 * (inclusive start/end), so usually just the first chunk of the file.
+	 * Returns null if the structure couldn't be read.
+	 */
+	static async mp4HasAudio(
+		readRange: (start: number, end: number) => Promise<Buffer>,
+		chunkSize = 512 * 1024,
+		maxMoovSize = 16 * 1024 * 1024,
+	): Promise<boolean | null> {
+		let bufStart = 0;
+		let buf = await readRange(0, chunkSize - 1);
+		const ensure = async (start: number, length: number): Promise<boolean> => {
+			if (start >= bufStart && start + length <= bufStart + buf.length) return true;
+			buf = await readRange(start, start + Math.max(length, chunkSize) - 1);
+			bufStart = start;
+			return length <= buf.length;
+		};
+
+		let offset = 0;
+		for (let i = 0; i < 20; i++) {
+			if (!(await ensure(offset, 16))) {
+				if (!(await ensure(offset, 8))) return null;
+			}
+			const rel = offset - bufStart;
+			let size = buf.readUInt32BE(rel);
+			const type = buf.toString('latin1', rel + 4, rel + 8);
+			if (size === 1) {
+				if (rel + 16 > buf.length) return null;
+				size = Number(buf.readBigUInt64BE(rel + 8));
+			}
+			if (type === 'moov') {
+				if (size === 0 || size > maxMoovSize) return null;
+				if (!(await ensure(offset, size))) return null;
+				const moov = buf.subarray(offset - bufStart, offset - bufStart + size);
+				let idx = moov.indexOf('hdlr', 0, 'latin1');
+				while (idx !== -1) {
+					// hdlr: [type 4][version+flags 4][pre_defined 4][handler_type 4]
+					if (moov.toString('latin1', idx + 12, idx + 16) === 'soun') return true;
+					idx = moov.indexOf('hdlr', idx + 4, 'latin1');
+				}
+				return false;
+			}
+			if (size < 8) return null; // size 0 (= to EOF) before moov, or corrupt
+			offset += size;
+		}
+		return null;
+	}
+
+	/**
+	 * Extracts the highest-bitrate audio-only track URL from Instagram's
+	 * `video_dash_manifest` (MPEG-DASH XML). Returns null if there's no
+	 * manifest or no audio track in it.
+	 */
+	static bestDashAudioUrl(manifest?: string | null): string | null {
+		if (!manifest || typeof manifest !== 'string') return null;
+		let best: { url: string; bandwidth: number } | null = null;
+		const setRe = /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi;
+		let set: RegExpExecArray | null;
+		while ((set = setRe.exec(manifest)) !== null) {
+			const setIsAudio = /contentType="audio"|mimeType="audio\//i.test(set[1]);
+			const repRe = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
+			let rep: RegExpExecArray | null;
+			while ((rep = repRe.exec(set[2])) !== null) {
+				const isAudio = setIsAudio || /mimeType="audio\//i.test(rep[1]);
+				if (!isAudio) continue;
+				const urlMatch = rep[2].match(/<BaseURL[^>]*>([^<]+)<\/BaseURL>/i);
+				if (!urlMatch) continue;
+				const bwMatch = rep[1].match(/bandwidth="(\d+)"/i);
+				const bandwidth = bwMatch ? parseInt(bwMatch[1], 10) : 0;
+				if (!best || bandwidth > best.bandwidth) {
+					best = { url: this.decodeHtmlEntities(urlMatch[1].trim()), bandwidth };
+				}
+			}
+		}
+		return best ? best.url : null;
+	}
+
+	/**
 	 * Flattens the first entry of Instagram's `preview_comments` (the
 	 * top/pinned comments shown under a post, included with media info at no
 	 * extra request) into a simple { text, author, likeCount } shape.
@@ -168,7 +248,7 @@ export class Utils {
 		return {
 			text: top.text,
 			author: top.user?.username ?? '',
-			likeCount: top.comment_like_count ?? 0,
+			likeCount: typeof top.comment_like_count === 'number' ? top.comment_like_count : null,
 		};
 	}
 
@@ -202,61 +282,45 @@ export class Utils {
 		return Math.round(value);
 	}
 
+	/** Converts a CDN `oe` (hex unix seconds) parameter into an ISO date, or null. Same as the Facebook scraper. */
+	static cdnUrlExpiry(url: string | null | undefined): string | null {
+		if (!url) return null;
+		const m = url.match(/[?&]oe=([0-9A-Fa-f]{8})\b/);
+		if (!m) return null;
+		const secs = parseInt(m[1], 16);
+		return Number.isFinite(secs) ? new Date(secs * 1000).toISOString() : null;
+	}
+
+	/** First non-empty caption line, max 120 chars. Same rule as the Facebook scraper. */
+	static titleFromCaption(caption: string | null, max = 120): string | null {
+		if (!caption) return null;
+		const first = caption.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
+		if (!first) return null;
+		const chars = Array.from(first);
+		return chars.length > max ? chars.slice(0, max - 1).join('').trimEnd() + '…' : first;
+	}
+
+	/** Finite number or null (never turns "missing" into 0). */
+	static num(v: unknown): number | null {
+		if (typeof v === 'number' && Number.isFinite(v)) return v;
+		if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+		return null;
+	}
+
 	/**
-	 * Best-effort extraction of post/reel metadata from the raw HTML of an
-	 * authenticated instagram.com page load. Used as a fallback when the
-	 * mobile private API is blocked by a `checkpoint_required` response.
-	 *
-	 * Instagram's Open Graph meta tags are the most stable part of the page
-	 * to parse; the "X likes, Y comments - username on DATE: "caption""
-	 * pattern in og:description is also long-standing, but may not always
-	 * match (e.g. if likes are hidden) - in that case counts default to 0.
+	 * Maps an error to the same `errorCode` values the Facebook scraper uses,
+	 * so error items from both nodes can be handled by one workflow branch.
+	 * Returns null when the cause isn't recognizable.
 	 */
-	static parsePostHtml(html: string, url: string, shortcode: string): IInstagramPostSummary {
-		const metaContent = (property: string): string => {
-			const re = new RegExp(`<meta property="${property}"\\s+content="([^"]*)"`, 'i');
-			const match = html.match(re);
-			return match ? this.decodeHtmlEntities(match[1]) : '';
-		};
-
-		const ogTitle = metaContent('og:title');
-		const ogDescription = metaContent('og:description');
-		const thumbnail = metaContent('og:image');
-		const isVideo = /<meta property="og:video/i.test(html) || /\/reel[s]?\//i.test(url);
-
-		let likeCount = 0;
-		let commentCount = 0;
-		let author = '';
-		let caption = ogDescription;
-
-		const statsMatch = ogDescription.match(
-			/^([\d.,KkMm]+)\s+likes?,\s+([\d.,KkMm]+)\s+comments?\s*-\s*([a-zA-Z0-9._]+)\s+on\s+[^:]+:\s*"?([\s\S]*?)"?$/,
-		);
-		if (statsMatch) {
-			likeCount = this.parseCompactNumber(statsMatch[1]);
-			commentCount = this.parseCompactNumber(statsMatch[2]);
-			author = statsMatch[3];
-			caption = statsMatch[4];
-		}
-
-		return {
-			url,
-			shortcode,
-			mediaId: '',
-			title: ogTitle || caption.split('\n')[0].trim() || 'Instagram post',
-			description: caption,
-			thumbnail,
-			videoUrl: null,
-			isVideo,
-			mediaType: isVideo ? 'video' : 'photo',
-			likeCount,
-			commentCount,
-			viewCount: null,
-			topComment: null,
-			author,
-			authorFullName: '',
-			takenAt: '',
-			takenAtTimestamp: 0,
-		};
+	static errorCode(error: any): string | null {
+		const m = this.formatError(error).toLowerCase();
+		if (m.includes('could not find a post/reel shortcode')) return 'INVALID_URL';
+		if (this.isRateLimitError(error)) return 'RATE_LIMITED';
+		if (/checkpoint|challenge_required|\/challenge\//.test(m)) return 'VERIFICATION_REQUIRED';
+		if (/login_required|\/accounts\/login|authentication failed|session (?:is )?(?:invalid|expired)|declined the request/.test(m)) return 'SESSION_EXPIRED';
+		if (/media not found|not available|no media item|http 404|does not exist/.test(m)) return 'CONTENT_UNAVAILABLE';
+		if (/fetch failed|enotfound|econnrefused|econnreset|etimedout|socket|tls/.test(m)) return 'NETWORK_ERROR';
+		if (/\bhttp \d{3}\b/.test(m)) return 'HTTP_ERROR';
+		return null;
 	}
 }

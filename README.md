@@ -6,11 +6,21 @@ n8n community node that extracts Instagram post/reel metadata (title, caption, t
 
 This is a fork of [n8n-nodes-instagram-private-api-wrapped](https://github.com/tiagohintz/n8n-nodes-instagram-private-api-wrapped) by tiagohintz (MIT licensed), trimmed down and extended specifically for metadata scraping:
 
-- Added **Post -> Get Info by URL**: paste any `instagram.com/p|reel|reels|tv/<shortcode>` URL and get back a flat, ready-to-use object (`title`, `description`, `thumbnail`, `videoUrl`, `likeCount`, `commentCount`, `viewCount`, `topComment`, `author`, `authorFullName`, `takenAt`, `mediaType`, `isVideo`).
+- Added **Post -> Get Info by URL**: paste any `instagram.com/p|reel|reels|tv/<shortcode>` URL and get back a flat, ready-to-use object (see *Common output* below – same fields as the Facebook scraper).
 - Shortcode -> media ID conversion is done locally (same algorithm Instagram itself uses), so unlike GraphQL-based scrapers this doesn't depend on Instagram's `doc_id`, which rotates every few weeks and breaks those scrapers.
 - Removed operations unrelated to metadata scraping (posting, liking, follow/unfollow, direct messages) to keep the node small and the maintenance surface minimal.
 - Automatic login + session caching: fill in Username/Password once in the credential and the node handles everything else — it logs in on first use, caches the resulting session in the workflow's static data, and reuses it on every later execution, only logging in again if that cached session ever expires or gets rejected.
 - Automatic web fallback: if the mobile private API returns `checkpoint_required` for a specific post/reel (this can happen for restricted/sensitive content even with a fully valid session, since Instagram scrutinizes mobile-app-style requests more than web traffic), the node automatically retries the same underlying endpoint using web-style headers (`X-IG-App-ID`, the same public ID instagram.com's own frontend uses) instead of the mobile app's signed-request scheme — the same access pattern the website itself uses internally, not something recognizable as "mobile app" traffic. It follows Instagram's cookie-bootstrapping redirects itself (accumulating whatever cookies Instagram sets along the way) rather than relying on a single static cookie header, and returns the same structured data as the primary path.
+
+## 2.0.0 – breaking changes
+
+Output unified with `@mattxcz/n8n-nodes-facebook-scraper`:
+- Unknown values are now `null` instead of `''` / `0` (e.g. `title`, `likeCount`, `takenAt`, `topComment.likeCount`).
+- `title` no longer falls back to "Instagram post by @…"; it's the first caption line (max 120 chars) or `null`.
+- `url` is the canonical post/reel URL; the original input is in `inputUrl`.
+- `hasSeparateAudio` now means "videoUrl has no audio, merge with audioUrl" (was: "audioUrl exists").
+- New fields: `platform`, `id`, `inputUrl`, `images`, `videoQuality`, `videoDeliveryType`, `videoHasAudio`, `videoUrlExpiresAt`, `durationSeconds`, `width`, `height`, `shareCount`, `authorId`, `authorUrl`, `authorIsVerified`, `authenticated`, `fetchedAt`.
+- Error items now include `errorCode` and `url`.
 
 ## Authentication
 
@@ -64,9 +74,48 @@ Copy the whole folder (or just `dist/`, `package.json`, `README.md`, `LICENSE`) 
 1. Add the **Instagram Scraper** node to your workflow.
 2. Resource: `Post`, Operation: `Get Info by URL`.
 3. URL: `{{ $json.url }}` or a hard-coded post/reel link.
-4. Output fields: `title`, `description`, `thumbnail`, `videoUrl`, `likeCount`, `commentCount`, `viewCount`, `topComment` (`{ text, author, likeCount }` of the top/pinned comment, or `null` if there are none), `author`, `authorFullName`, `takenAt`, `mediaType`, `isVideo`.
+4. Output: see below.
 
-`videoUrl` is the direct link to the highest-quality video file for reels/videos (and for carousels that lead with one), or `null` for photo posts. Both `thumbnail` and `videoUrl` are temporary, signed CDN URLs — download or forward them promptly, they expire.
+### Common output (identical in the Instagram and Facebook scraper)
+
+Both nodes (`@mattxcz/n8n-nodes-instagram-scraper`, `@mattxcz/n8n-nodes-facebook-scraper`) return the same core fields with the same names, types and meaning, so one downstream workflow can handle both. Unknown values are `null`; `0` means the platform really reported zero. Dates are ISO 8601.
+
+| Field | Notes |
+|---|---|
+| `platform` | `"instagram"` / `"facebook"` |
+| `id`, `url`, `inputUrl` | Platform id, canonical URL, URL as passed in |
+| `title` | First non-empty line of the caption (max 120 chars), or `null` |
+| `description` | Full caption / post text |
+| `thumbnail` | Cover image (signed CDN URL, expires) |
+| `images[]` | Photos only, `{ id, url, width, height, alt }`, full resolution. A video's cover frame is in `thumbnail`. |
+| `mediaType`, `isVideo` | `photo` \| `carousel` \| `video` \| `unknown` (Facebook posts also `text` \| `link`) |
+| `videoUrl` | Direct video file, or `null` |
+| `videoQuality` | e.g. `720p` (Facebook progressive: `HD` / `SD`) |
+| `videoDeliveryType` | `progressive` = one standalone MP4, `dash` = single DASH video track |
+| `videoHasAudio` | Whether the file at `videoUrl` itself contains audio – verified by reading the MP4 track list (HTTP Range, usually one ~512 kB request). `null` = no video / check failed |
+| `hasSeparateAudio` | `true` = `videoUrl` has **no** audio and the sound is in `audioUrl` → merge them |
+| `audioUrl` | Best audio-only track (DASH) whenever available – also when `videoUrl` already has audio (handy for transcription) |
+| `videoUrlExpiresAt` | Expiry of the signed CDN URL (from the `oe` parameter) |
+| `durationSeconds`, `width`, `height` | Video duration and dimensions |
+| `likeCount`, `commentCount`, `viewCount`, `shareCount` | `likeCount` = likes (Instagram) / all reactions (Facebook) |
+| `topComment` | `{ text, author, likeCount }` or `null` |
+| `author`, `authorFullName`, `authorId`, `authorUrl`, `authorIsVerified` | `author` = username / vanity name |
+| `takenAt`, `takenAtTimestamp` | Publish time (ISO 8601 / unix seconds) |
+| `authenticated`, `fetchedAt` | Whether a logged-in session was used; time of the lookup |
+
+Error items (with *On Error → Continue*) have the same shape in both nodes: `{ error, errorCode, url }`, where `errorCode` is one of `INVALID_URL`, `CONTENT_UNAVAILABLE`, `SESSION_EXPIRED`, `LOGIN_REQUIRED`, `VERIFICATION_REQUIRED`, `RATE_LIMITED`, `PAGE_STRUCTURE_CHANGED`, `NETWORK_ERROR`, `HTTP_ERROR` or `null`.
+
+**Getting a video with sound in every case:** if `hasSeparateAudio` is `true`, merge the two files:
+
+```bash
+ffmpeg -i video.mp4 -i audio.mp4 -map 0:v -map 1:a -c copy out.mp4
+```
+
+Instagram-specific extras: `shortcode`, `mediaId`.
+
+Notes:
+- `viewCount` = reel plays; `likeCount` is `null` when the author hid like counts; `shareCount` is usually `null` (Instagram rarely exposes it).
+- Instagram's `videoUrl` is a progressive MP4 that normally already contains audio (`videoHasAudio: true`, `hasSeparateAudio: false`); `audioUrl` comes from the reel's DASH manifest.
 
 ### Handling failures per item
 

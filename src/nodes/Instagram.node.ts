@@ -287,7 +287,7 @@ export class Instagram implements INodeType {
 				return [
 					items.map((_, i) => {
 						const errorItem: INodeExecutionData = {
-							json: { error: authError.message },
+							json: { error: authError.message, errorCode: Utils.errorCode(error), url: safeUrl(this, i) },
 							pairedItem: { item: i },
 						};
 						if (toErrorOutput) {
@@ -350,7 +350,7 @@ export class Instagram implements INodeType {
 				if (this.continueOnFail()) {
 					const nodeError = new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });
 					const errorItem: INodeExecutionData = {
-						json: { error: nodeError.message },
+						json: { error: nodeError.message, errorCode: Utils.errorCode(error), url: safeUrl(this, i) },
 						pairedItem: { item: i },
 					};
 					// This mirrors the pattern n8n's own core nodes use (e.g.
@@ -373,5 +373,14 @@ export class Instagram implements INodeType {
 		}
 
 		return [returnData];
+	}
+}
+
+/** Same error-item shape as the Facebook scraper: { error, errorCode, url }. */
+function safeUrl(ctx: IExecuteFunctions, i: number): string | null {
+	try {
+		return (ctx.getNodeParameter('url', i, '') as string) || null;
+	} catch {
+		return null;
 	}
 }

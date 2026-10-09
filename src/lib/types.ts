@@ -82,6 +82,8 @@ export interface IInstagramCarouselItem {
 		width: number;
 		height: number;
 	}>;
+	video_dash_manifest?: string | null;
+	has_audio?: boolean;
 }
 
 export interface IInstagramMediaInfo {
@@ -111,6 +113,10 @@ export interface IInstagramMediaInfo {
 		width: number;
 		height: number;
 	}>;
+	/** MPEG-DASH manifest (XML); holds separate video-only and audio-only tracks. */
+	video_dash_manifest?: string | null;
+	/** Instagram's own flag: does the media have any sound at all. */
+	has_audio?: boolean;
 	carousel_media?: IInstagramCarouselItem[];
 	/** Raw "top comments" preview Instagram includes with media info, without a separate comment.list() call. */
 	preview_comments?: IInstagramRawComment[];
@@ -131,35 +137,78 @@ export interface IInstagramRawComment {
 	};
 }
 
-/** Flat summary of a post's top comment, as returned in IInstagramPostSummary. */
+/** Flat summary of a post's top comment (same shape as in the Facebook scraper). */
 export interface IInstagramTopComment {
 	text: string;
 	author: string;
-	likeCount: number;
+	likeCount: number | null;
+}
+
+export interface IInstagramImage {
+	id: string | null;
+	url: string;
+	width: number | null;
+	height: number | null;
+	alt: string | null;
 }
 
 /**
- * Normalized, ready-to-use summary of a single Instagram post/reel.
- * This is what the "Post -> Get Info by URL" operation returns.
+ * Normalized output of "Post -> Get Info by URL".
+ *
+ * The shared fields use exactly the same names, types and meaning as the
+ * Facebook scraper node (@mattxcz/n8n-nodes-facebook-scraper), so both can
+ * feed the same downstream workflow. Unknown values are `null`; `0` only
+ * means Instagram actually reported zero.
  */
 export interface IInstagramPostSummary {
+	platform: 'instagram';
+	id: string;
 	url: string;
+	inputUrl: string;
+	title: string | null;
+	description: string | null;
+	thumbnail: string | null;
+	images: IInstagramImage[];
+	mediaType: 'photo' | 'video' | 'carousel' | 'unknown';
+	isVideo: boolean;
+
+	videoUrl: string | null;
+	/** e.g. '1080p' (shorter side of the chosen file). */
+	videoQuality: string | null;
+	/** 'progressive' = one standalone MP4 file; 'dash' = a single DASH track. */
+	videoDeliveryType: 'progressive' | 'dash' | null;
+	/** Whether the file at videoUrl itself contains audio (read from the MP4 track list). null = unknown / no video. */
+	videoHasAudio: boolean | null;
+	/** true = videoUrl has no audio and the sound is in audioUrl -> merge them (ffmpeg). */
+	hasSeparateAudio: boolean | null;
+	/** Best audio-only track (DASH), whenever available - also when videoUrl already has audio. */
+	audioUrl: string | null;
+	/** CDN URLs are signed and expire; parsed from the `oe` query parameter. */
+	videoUrlExpiresAt: string | null;
+	durationSeconds: number | null;
+	width: number | null;
+	height: number | null;
+
+	likeCount: number | null;
+	commentCount: number | null;
+	viewCount: number | null;
+	shareCount: number | null;
+	topComment: IInstagramTopComment | null;
+
+	author: string | null;
+	authorFullName: string | null;
+	authorId: string | null;
+	authorUrl: string | null;
+	authorIsVerified: boolean | null;
+
+	takenAt: string | null;
+	takenAtTimestamp: number | null;
+	authenticated: boolean;
+	fetchedAt: string;
+
+	// Instagram-specific
 	shortcode: string;
 	mediaId: string;
-	title: string;
-	description: string;
-	thumbnail: string;
-	videoUrl: string | null;
-	isVideo: boolean;
-	mediaType: 'photo' | 'video' | 'carousel' | 'unknown';
-	likeCount: number;
-	commentCount: number;
-	viewCount: number | null;
-	topComment: IInstagramTopComment | null;
-	author: string;
-	authorFullName: string;
-	takenAt: string;
-	takenAtTimestamp: number;
 }
 
 export interface IInstagramComment {

@@ -7,6 +7,7 @@ import {
 	IInstagramTimelineFeed,
 	IInstagramMediaInfo,
 	IInstagramPostSummary,
+	IInstagramImage,
 	IInstagramLoginResult,
 } from './types';
 import { Utils } from './utils';
@@ -87,6 +88,36 @@ export class InstagramClient {
 			throw new Error(
 				cause ? `${baseMessage} (${url}): ${cause}` : `${baseMessage} (${url})`,
 			);
+		}
+	}
+
+	/**
+	 * Checks whether the MP4 at `videoUrl` actually contains an audio stream.
+	 * If Instagram already says the media has no sound (`has_audio: false`)
+	 * nothing is downloaded. Otherwise only the MP4 header (usually the first
+	 * ~512 kB, via HTTP Range) is fetched. Never throws - falls back to
+	 * Instagram's `has_audio` flag (or null) if the check fails.
+	 */
+	private async detectVideoHasAudio(videoUrl: string | null, hasAudioFlag?: boolean): Promise<boolean | null> {
+		if (!videoUrl) return null;
+		if (hasAudioFlag === false) return false;
+		try {
+			const result = await Utils.mp4HasAudio(async (start, end) => {
+				const response = await this.fetchWithProxy(videoUrl, {
+					headers: {
+						Range: `bytes=${start}-${end}`,
+						'User-Agent':
+							'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+					},
+				});
+				if (!response.ok) throw new Error(`HTTP ${response.status}`);
+				const data = Buffer.from(await response.arrayBuffer());
+				// 200 instead of 206 = server ignored Range and sent the whole file.
+				return response.status === 206 ? data : data.subarray(start, end + 1);
+			});
+			return result ?? hasAudioFlag ?? null;
+		} catch {
+			return hasAudioFlag ?? null;
 		}
 	}
 
@@ -715,6 +746,12 @@ export class InstagramClient {
 		}
 	}
 
+	/** Raw media item from the private API (full field set, used for summaries). */
+	private async getRawMediaItem(mediaId: string): Promise<any> {
+		const media = await this.client.media.info(mediaId);
+		return media.items[0] as any;
+	}
+
 	/**
 	 * Get detailed info for a media item by its numeric media ID (the
 	 * IgApiClient "pk", not the shortcode). Used internally by getPostByUrl,
@@ -724,8 +761,7 @@ export class InstagramClient {
 		this.ensureAuthenticated();
 		this.ensurePrivateApiAvailable('Media -> Get Media Info');
 		try {
-			const media = await this.client.media.info(mediaId);
-			const item = media.items[0] as any;
+			const item = await this.getRawMediaItem(mediaId);
 
 			return {
 				id: item.id,
@@ -744,6 +780,8 @@ export class InstagramClient {
 				},
 				image_versions2: item.image_versions2,
 				video_versions: item.video_versions || [],
+				video_dash_manifest: item.video_dash_manifest ?? null,
+				has_audio: item.has_audio,
 				carousel_media: item.carousel_media,
 				preview_comments: item.preview_comments || [],
 			};
@@ -796,53 +834,13 @@ export class InstagramClient {
 		}
 
 		const mediaId = Utils.shortcodeToMediaId(shortcode);
-		const info = await this.getMediaInfo(mediaId);
-
-		const mediaTypeMap: Record<number, IInstagramPostSummary['mediaType']> = {
-			1: 'photo',
-			2: 'video',
-			8: 'carousel',
-		};
-		const mediaType = mediaTypeMap[info.media_type] ?? 'unknown';
-		const isVideo = mediaType === 'video';
-
-		// Pick the best thumbnail: first carousel item's image, else the
-		// item's own image_versions2, else a video's own cover frame.
-		let thumbnail = Utils.bestImageUrl(info.image_versions2);
-		if (!thumbnail && info.carousel_media && info.carousel_media.length > 0) {
-			thumbnail = Utils.bestImageUrl(info.carousel_media[0].image_versions2);
+		let item: any;
+		try {
+			item = await this.getRawMediaItem(mediaId);
+		} catch (error) {
+			throw new Error(`Failed to get media info: ${Utils.formatError(error)}`);
 		}
-
-		// Same fallback pattern as thumbnail above, but for the playable video
-		// file: the item's own video_versions, else the first carousel item's
-		// (for carousels that lead with a video/reel-style clip).
-		let videoUrl = Utils.bestVideoUrl(info.video_versions);
-		if (!videoUrl && info.carousel_media && info.carousel_media.length > 0) {
-			videoUrl = Utils.bestVideoUrl(info.carousel_media[0].video_versions);
-		}
-
-		const caption = info.caption ?? '';
-		const firstLine = caption.split('\n')[0].trim();
-
-		return {
-			url,
-			shortcode,
-			mediaId,
-			title: firstLine || caption.slice(0, 100) || `Instagram post by @${info.user.username}`,
-			description: caption,
-			thumbnail,
-			videoUrl,
-			isVideo,
-			mediaType,
-			likeCount: info.like_count ?? 0,
-			commentCount: info.comment_count ?? 0,
-			viewCount: info.view_count ?? info.play_count ?? null,
-			topComment: Utils.topCommentFromPreview(info.preview_comments),
-			author: info.user.username,
-			authorFullName: info.user.full_name,
-			takenAt: Utils.formatTimestamp(info.taken_at),
-			takenAtTimestamp: info.taken_at,
-		};
+		return await this.summarizeItem(item, url, shortcode, mediaId);
 	}
 
 	/**
@@ -943,45 +941,104 @@ export class InstagramClient {
 			);
 		}
 
+		return await this.summarizeItem(item, url, shortcode, mediaId);
+	}
+
+	/**
+	 * Turns a raw Instagram media item (same shape from the private API and
+	 * from the web /api/v1/media/<id>/info/ endpoint) into the normalized
+	 * summary. Field names/meaning match the Facebook scraper node.
+	 */
+	private async summarizeItem(item: any, url: string, shortcode: string, mediaId: string): Promise<IInstagramPostSummary> {
 		const mediaTypeMap: Record<number, IInstagramPostSummary['mediaType']> = {
 			1: 'photo',
 			2: 'video',
 			8: 'carousel',
 		};
 		const mediaType = mediaTypeMap[item.media_type] ?? 'unknown';
-		const isVideo = mediaType === 'video';
+		const children: any[] = Array.isArray(item.carousel_media) ? item.carousel_media : [];
+		// The item that carries the video: itself, else the first carousel child with one.
+		const videoItem =
+			(item.video_versions?.length ? item : null) ?? children.find((c) => c?.video_versions?.length) ?? null;
 
-		let thumbnail = Utils.bestImageUrl(item.image_versions2);
-		if (!thumbnail && item.carousel_media && item.carousel_media.length > 0) {
-			thumbnail = Utils.bestImageUrl(item.carousel_media[0].image_versions2);
+		// ---- images: photos only (a video's cover frame is in `thumbnail`), same as the Facebook scraper
+		const images: IInstagramImage[] = [];
+		for (const src of children.length ? children : [item]) {
+			if (src?.media_type === 2 || src?.video_versions?.length) continue;
+			const cands = src?.image_versions2?.candidates;
+			if (!Array.isArray(cands) || !cands.length) continue;
+			const best = cands.reduce((x: any, y: any) => (y.width > x.width ? y : x));
+			images.push({
+				id: src.id ? String(src.id) : null,
+				url: best.url,
+				width: Utils.num(best.width),
+				height: Utils.num(best.height),
+				alt: src.accessibility_caption ?? null,
+			});
 		}
+		const thumbnail = Utils.bestImageUrl(item.image_versions2) || images[0]?.url || null;
 
-		let videoUrl = Utils.bestVideoUrl(item.video_versions);
-		if (!videoUrl && item.carousel_media && item.carousel_media.length > 0) {
-			videoUrl = Utils.bestVideoUrl(item.carousel_media[0].video_versions);
+		// ---- video + audio
+		let videoUrl: string | null = null;
+		let videoQuality: string | null = null;
+		if (videoItem) {
+			const best = (videoItem.video_versions as any[]).reduce((x, y) => (y.width > x.width ? y : x));
+			videoUrl = best.url;
+			const w = Utils.num(best.width);
+			const h = Utils.num(best.height);
+			videoQuality = w && h ? `${Math.min(w, h)}p` : null;
 		}
+		const audioUrl = Utils.bestDashAudioUrl(videoItem?.video_dash_manifest);
+		const hasAudioFlag: boolean | undefined = videoItem?.has_audio ?? item.has_audio;
+		const videoHasAudio = await this.detectVideoHasAudio(videoUrl, hasAudioFlag);
+		const hasSeparateAudio = videoUrl ? (videoHasAudio === null ? null : videoHasAudio === false && audioUrl !== null) : null;
 
-		const caption = item.caption?.text ?? '';
-		const firstLine = caption.split('\n')[0].trim();
+		const caption: string | null = typeof item.caption?.text === 'string' && item.caption.text !== '' ? item.caption.text : null;
+		const username: string | null = item.user?.username ?? null;
+		const takenAtTs = Utils.num(item.taken_at);
 
 		return {
-			url,
-			shortcode,
-			mediaId,
-			title: firstLine || caption.slice(0, 100) || `Instagram post by @${item.user?.username ?? ''}`,
+			platform: 'instagram',
+			id: mediaId,
+			url: `https://www.instagram.com/${item.product_type === 'clips' ? 'reel' : 'p'}/${shortcode}/`,
+			inputUrl: url,
+			title: Utils.titleFromCaption(caption),
 			description: caption,
 			thumbnail,
-			videoUrl,
-			isVideo,
+			images,
 			mediaType,
-			likeCount: item.like_count ?? 0,
-			commentCount: item.comment_count ?? 0,
-			viewCount: item.view_count ?? item.play_count ?? null,
+			isVideo: mediaType === 'video',
+
+			videoUrl,
+			videoQuality,
+			videoDeliveryType: videoUrl ? 'progressive' : null,
+			videoHasAudio,
+			hasSeparateAudio,
+			audioUrl,
+			videoUrlExpiresAt: Utils.cdnUrlExpiry(videoUrl),
+			durationSeconds: Utils.num(videoItem?.video_duration),
+			width: Utils.num(videoItem?.original_width ?? item.original_width),
+			height: Utils.num(videoItem?.original_height ?? item.original_height),
+
+			likeCount: item.like_and_view_counts_disabled ? null : Utils.num(item.like_count),
+			commentCount: Utils.num(item.comment_count),
+			viewCount: Utils.num(item.play_count) ?? Utils.num(item.ig_play_count) ?? Utils.num(item.view_count),
+			shareCount: Utils.num(item.reshare_count) ?? Utils.num(item.share_count),
 			topComment: Utils.topCommentFromPreview(item.preview_comments),
-			author: item.user?.username ?? '',
-			authorFullName: item.user?.full_name ?? '',
-			takenAt: item.taken_at ? Utils.formatTimestamp(item.taken_at) : '',
-			takenAtTimestamp: item.taken_at ?? 0,
+
+			author: username,
+			authorFullName: item.user?.full_name || null,
+			authorId: item.user?.pk != null ? String(item.user.pk) : item.user?.id != null ? String(item.user.id) : null,
+			authorUrl: username ? `https://www.instagram.com/${username}/` : null,
+			authorIsVerified: typeof item.user?.is_verified === 'boolean' ? item.user.is_verified : null,
+
+			takenAt: takenAtTs ? Utils.formatTimestamp(takenAtTs) : null,
+			takenAtTimestamp: takenAtTs,
+			authenticated: true,
+			fetchedAt: new Date().toISOString(),
+
+			shortcode,
+			mediaId,
 		};
 	}
 
